@@ -1,73 +1,112 @@
 # SAE admission-risk simulator
 
-Structure du projet après découpage du script monolithique original en
-modules dédiés.
+A Streamlit application to simulate admission risk in the Chilean SAE school-admission system.
 
-## Lancer l'application
+The tool lets families build a preference list, estimate admission probabilities for selected programs, and identify similar programs that may be worth considering.
+
+## Features
+
+- Build a ranked preference list of school programs.
+- Support strict rankings and equivalence classes.
+- Estimate admission probabilities using the SAE lottery logic.
+- Display risk indicators for each selected program.
+- Recommend similar programs based on school characteristics.
+- Filter programs by region, commune, education level, gender composition, school day, and other available criteria.
+- Run locally without sending student identifiers or preference lists to an external server.
+
+## Run the application
+
+Install the required packages:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Launch the app:
+
+```bash
 streamlit run app.py
 ```
 
-L'application attend les fichiers de données suivants dans un dossier
-`data/` placé à côté de `app.py` (inchangé par rapport à l'original) :
+The application should then open in your browser.
 
-- `data/capacities_2025_wta_with_2024_calibration.csv`
-- `data/programmes_chili_criteres_recommandation.csv`
-- `data/rbd_region_map.csv`
-- `data/program_filters.csv`
-- `data/commune_coordinates.csv` *(optionnel, améliore le calcul de proximité)*
+## Required data files
 
-## Structure
+The app expects the following files in a `data/` folder located next to `app.py`:
 
+```text
+data/
+    capacities_2025_wta_with_2024_calibration.csv
+    programmes_chili_criteres_recommandation.csv
+    rbd_region_map.csv
+    program_filters.csv
 ```
-app.py                          # Point d'entrée Streamlit : orchestration uniquement
+
+## Project structure
+
+```text
+app.py                          # Streamlit entry point
 requirements.txt
+README.md
+
+data/                           # Input data files
+
 sae_app/
-    __init__.py                 # Vue d'ensemble du découpage (docstring)
-    constants.py                # Colonnes, seuils, chemins de fichiers, options de filtres
-    i18n.py                     # Dictionnaire de traduction ES/EN + t()
-    text_utils.py                # Nettoyage de texte/nombres (aucune dépendance interne)
-    data_loading.py             # Lecture et validation des CSV
-    program_options.py          # ProgramRecord + construction/filtrage du menu déroulant
-    mtb_engine.py                # Hash SHA-256, priorités, modèle hypergéométrique (pur, sans Streamlit)
-    wish_list.py                 # Parsing de la liste de préférences, classes d'équivalence
-    geo.py                        # Coordonnées, distance, géocodage d'adresse
-    recommendations.py           # Moteur de recommandation "programmes similaires"
-    session_state.py            # Invalidation de simulation, nettoyage des clés de widgets
-    ui_common.py                  # Formatage d'affichage partagé (traduction de tableaux)
-    ui_simulation.py              # Rendu des résultats de simulation (résumé, sensibilité)
-    ui_wish_builder.py           # Rendu du widget de construction de la liste
-    ui_recommendations.py        # Rendu de la section "programmes similaires recommandés"
+    __init__.py
+    constants.py                # Constants, column names, thresholds, file paths
+    i18n.py                     # Spanish/English translation dictionary
+    text_utils.py               # Text and number cleaning utilities
+    data_loading.py             # CSV loading and validation
+    program_options.py          # Program records and dropdown-menu construction
+    mtb_engine.py               # Lottery number, priority, and admission-risk calculations
+    wish_list.py                # Preference-list parsing and equivalence-class handling
+    geo.py                      # Geographic coordinates, distances, and address geocoding
+    recommendations.py          # Similar-program recommendation engine
+    session_state.py            # Streamlit session-state helpers
+    ui_common.py                # Shared UI formatting helpers
+    ui_simulation.py            # Simulation-result display
+    ui_wish_builder.py          # Preference-list builder UI
+    ui_recommendations.py       # Similar-program recommendation UI
 ```
 
-## Principe de découpage
+## How the app works
 
-- **Moteur de calcul pur** (`mtb_engine.py`, une bonne partie de `wish_list.py`,
-  `recommendations.py`) : aucune dépendance à `streamlit` pour l'affichage —
-  seul `i18n.t()` est utilisé pour les messages d'erreur traduits. Ces modules
-  sont testables unitairement sans lancer l'app.
-- **Chargement de données** (`data_loading.py`) : sait interpréter les CSV
-  sources (encodage, noms de colonnes variables, traduction des valeurs
-  FR→EN), ne sait rien de l'UI.
-- **UI** (`ui_*.py`) : ne contient que des appels `st.*` et fait appel aux
-  modules de calcul ; ne contient aucune formule.
-- **`app.py`** : uniquement l'enchaînement des sections de la page, dans le
-  même ordre que l'original. Aucune logique métier n'y a été ajoutée.
+The user enters a student identifier and builds a list of preferred school programs.
 
-## Différences volontaires avec le script original
+For each selected program, the app uses historical calibration data, program capacities, priority groups, and the student lottery number to estimate the probability of admission.
 
-Ce sont des simplifications mineures, sans changement de comportement :
+The app then displays:
 
-- Dans `ui_recommendations.py`, l'ajout d'un programme recommandé à la liste
-  utilise désormais `make_builder_wish_row(...)` (déjà utilisé ailleurs)
-  plutôt que de reconstruire le même dictionnaire à la main.
-- Quelques imports de constantes non utilisées après le découpage
-  (`RECOMMENDATION_CRITERIA_BY_COL`, `PROGRAM_GEO_SOURCE`, etc.) avaient déjà
-  été supprimés dans la version précédente et le restent ici.
+- the estimated probability of assignment to each selected program;
+- risk indicators for the preference list;
+- sensitivity information when relevant;
+- recommended similar programs based on the selected preferences.
 
-Le contenu du dictionnaire de traductions (`sae_app/i18n.py`) a été conservé
-tel quel, y compris quelques clés qui ne sont plus référencées ailleurs dans
-le code (ex. `"Safety option"`, `"Portfolio score"`) — un nettoyage de ce
-fichier n'était pas dans le périmètre de cette demande.
+## Local use and privacy
+
+The application is designed to run locally.
+
+When used locally, student identifiers and preference lists remain on the user’s machine. The app uses the identifier only to compute the lottery-based admission-risk estimates during the local session.
+
+## Dependencies
+
+The main dependencies are listed in `requirements.txt`:
+
+```text
+streamlit
+pandas
+numpy
+scipy
+```
+
+Install them with:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Notes
+
+This tool is intended as an admission-risk simulator and decision-support interface. It does not replace official SAE results or guarantee admission outcomes.
+
+Admission probabilities are estimates based on the available data and assumptions encoded in the model.
