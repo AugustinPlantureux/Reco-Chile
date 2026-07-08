@@ -1,0 +1,281 @@
+"""Rendering the wish-list builder widget.
+
+render_wish_list_builder() draws the "add a program" selector plus the
+current list of wishes (with reorder arrows in strict mode, or a group
+number input in equivalence-class mode), and returns the same cleaned
+DataFrame the simulation engine expects.
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+import pandas as pd
+import streamlit as st
+
+from sae_app.constants import EQUIV_GROUP, LOTTERY, PRIORITIES, PROGRAM, REGION, SAFETY, SCHOOL_COMMUNE, SCHOOL_NAME, WISH_RANK
+from sae_app.i18n import t
+from sae_app.session_state import invalidate_simulation_state, update_builder_state
+from sae_app.text_utils import as_bool
+from sae_app.wish_list import make_builder_wish_row, non_empty_wish_rows, normalize_builder_wishes
+
+
+def render_wish_list_builder(
+    *,
+    editor_state_key: str,
+    editor_widget_key_base: str,
+    program_options_for_editor: list[str],
+    program_mapping: dict[str, pd.Series],
+    use_equivalence_classes: bool,
+    simulation_done_key: str | None = None,
+    simulation_result_key: str | None = None,
+    simulation_student_id_key: str | None = None,
+) -> pd.DataFrame:
+    """
+    Friendlier wish-list input UI.
+
+    Returns the same cleaned DataFrame that the simulation engine already expects.
+    """
+    current = normalize_builder_wishes(
+        st.session_state[editor_state_key],
+        use_equivalence_classes,
+    )
+    current_non_empty = non_empty_wish_rows(current)
+
+    selected_programs = set(current_non_empty[PROGRAM].astype(str).str.strip())
+    add_options = [
+        p for p in program_options_for_editor
+        if str(p).strip() and p in program_mapping and p not in selected_programs
+    ]
+
+    st.markdown(t("#### Add programs"))
+
+    add_cols = st.columns([5, 1])
+    with add_cols[0]:
+        program_to_add = st.selectbox(
+            t("Search for a program"),
+            options=[""] + add_options,
+            key=f"{editor_widget_key_base}_add_program",
+            help=t("Start typing the school name, commune, RBD, or program details."),
+        )
+
+    with add_cols[1]:
+        st.write("")
+        st.write("")
+        add_clicked = st.button(
+            t("Add"),
+            disabled=not bool(program_to_add),
+            key=f"{editor_widget_key_base}_add_button",
+        )
+
+    if add_clicked and program_to_add:
+        next_rank = len(current_non_empty) + 1
+
+        if use_equivalence_classes:
+            existing_groups = pd.to_numeric(
+                current_non_empty.get(EQUIV_GROUP, pd.Series(dtype=float)),
+                errors="coerce",
+            ).dropna()
+            next_group = int(existing_groups.max()) + 1 if not existing_groups.empty else next_rank
+        else:
+            next_group = next_rank
+
+        new_row = make_builder_wish_row(program_to_add, next_rank, next_group)
+        updated = pd.concat(
+            [current_non_empty, pd.DataFrame([new_row])],
+            ignore_index=True,
+        )
+
+        update_builder_state(
+            updated,
+            editor_state_key=editor_state_key,
+            editor_widget_key_base=editor_widget_key_base,
+            use_equivalence_classes=use_equivalence_classes,
+            simulation_done_key=simulation_done_key,
+            simulation_result_key=simulation_result_key,
+            simulation_student_id_key=simulation_student_id_key,
+        )
+
+    if current_non_empty.empty:
+        st.info(t("No program selected yet. Add the student's first wish above."))
+        return current
+
+    st.markdown(t("#### Current wish list"))
+
+    if use_equivalence_classes:
+        st.caption(
+            t("Set the same preference-group number for programs considered equivalent. Group 1 is preferred to group 2, etc.")
+        )
+        display_rows = current_non_empty.sort_values(
+            [EQUIV_GROUP, WISH_RANK],
+            kind="stable",
+        ).reset_index(drop=True)
+    else:
+        st.caption(t("Use ↑ and ↓ to reorder the student's strict ranking."))
+        display_rows = current_non_empty.reset_index(drop=True)
+
+    edited_rows = []
+
+    for i, row in display_rows.iterrows():
+        program_label = str(row[PROGRAM]).strip()
+        row_key = hashlib.md5(program_label.encode("utf-8")).hexdigest()[:10]
+
+        with st.container(border=True):
+            top_cols = st.columns([0.8, 5, 0.7, 0.7, 1])
+
+            with top_cols[0]:
+                if use_equivalence_classes:
+                    group_value = st.number_input(
+                        t("Group"),
+                        min_value=1,
+                        value=int(row[EQUIV_GROUP]),
+                        step=1,
+                        key=f"{editor_widget_key_base}_group_{row_key}",
+                    )
+                    wish_rank_value = i + 1
+                else:
+                    st.markdown(f"**#{i + 1}**")
+                    wish_rank_value = i + 1
+                    group_value = i + 1
+
+            with top_cols[1]:
+                st.markdown(f"**{program_label}**")
+
+                if program_label in program_mapping:
+                    program_row = program_mapping[program_label]
+                    school = str(program_row.get(SCHOOL_NAME, "")).strip()
+                    commune = str(program_row.get(SCHOOL_COMMUNE, "")).strip()
+                    region = str(program_row.get(REGION, "")).strip()
+
+                    details = " · ".join(
+                        part for part in [school, commune, region]
+                        if part and part.lower() != "nan"
+                    )
+                    if details:
+                        st.caption(details)
+
+            with top_cols[2]:
+                if not use_equivalence_classes:
+                    if st.button(
+                        "↑",
+                        disabled=i == 0,
+                        key=f"{editor_widget_key_base}_up_{row_key}",
+                    ):
+                        updated = display_rows.copy()
+                        order = list(range(len(updated)))
+                        order[i - 1], order[i] = order[i], order[i - 1]
+                        updated = updated.iloc[order].reset_index(drop=True)
+
+                        update_builder_state(
+                            updated,
+                            editor_state_key=editor_state_key,
+                            editor_widget_key_base=editor_widget_key_base,
+                            use_equivalence_classes=use_equivalence_classes,
+                            simulation_done_key=simulation_done_key,
+                            simulation_result_key=simulation_result_key,
+                            simulation_student_id_key=simulation_student_id_key,
+                        )
+
+            with top_cols[3]:
+                if not use_equivalence_classes:
+                    if st.button(
+                        "↓",
+                        disabled=i == len(display_rows) - 1,
+                        key=f"{editor_widget_key_base}_down_{row_key}",
+                    ):
+                        updated = display_rows.copy()
+                        order = list(range(len(updated)))
+                        order[i], order[i + 1] = order[i + 1], order[i]
+                        updated = updated.iloc[order].reset_index(drop=True)
+
+                        update_builder_state(
+                            updated,
+                            editor_state_key=editor_state_key,
+                            editor_widget_key_base=editor_widget_key_base,
+                            use_equivalence_classes=use_equivalence_classes,
+                            simulation_done_key=simulation_done_key,
+                            simulation_result_key=simulation_result_key,
+                            simulation_student_id_key=simulation_student_id_key,
+                        )
+
+            with top_cols[4]:
+                if st.button(
+                    t("Remove"),
+                    key=f"{editor_widget_key_base}_remove_{row_key}",
+                ):
+                    updated = display_rows.drop(index=i).reset_index(drop=True)
+
+                    update_builder_state(
+                        updated,
+                        editor_state_key=editor_state_key,
+                        editor_widget_key_base=editor_widget_key_base,
+                        use_equivalence_classes=use_equivalence_classes,
+                        simulation_done_key=simulation_done_key,
+                        simulation_result_key=simulation_result_key,
+                        simulation_student_id_key=simulation_student_id_key,
+                    )
+
+            prio_cols = st.columns(5)
+
+            priority_sibling = prio_cols[0].checkbox(
+                t("Sibling"),
+                value=as_bool(row.get("priority_sibling", False)),
+                key=f"{editor_widget_key_base}_sib_{row_key}",
+            )
+            priority_student = prio_cols[1].checkbox(
+                t("Priority student"),
+                value=as_bool(row.get("priority_student", False)),
+                key=f"{editor_widget_key_base}_student_{row_key}",
+            )
+            priority_parent = prio_cols[2].checkbox(
+                t("Civil servant"),
+                value=as_bool(row.get("priority_parent_civil_servant", False)),
+                key=f"{editor_widget_key_base}_parent_{row_key}",
+            )
+            priority_ex_student = prio_cols[3].checkbox(
+                t("Former student"),
+                value=as_bool(row.get("priority_ex_student", False)),
+                key=f"{editor_widget_key_base}_ex_{row_key}",
+            )
+            safety = prio_cols[4].checkbox(
+                t("Already enrolled"),
+                value=as_bool(row.get(SAFETY, False)),
+                key=f"{editor_widget_key_base}_safety_{row_key}",
+            )
+
+            edited_rows.append({
+                WISH_RANK: wish_rank_value,
+                EQUIV_GROUP: group_value,
+                PROGRAM: program_label,
+                LOTTERY: 1,
+                "priority_sibling": priority_sibling,
+                "priority_student": priority_student,
+                "priority_parent_civil_servant": priority_parent,
+                "priority_ex_student": priority_ex_student,
+                SAFETY: safety,
+            })
+
+    edited = normalize_builder_wishes(
+        pd.DataFrame(edited_rows),
+        use_equivalence_classes,
+    )
+
+    old = normalize_builder_wishes(
+        st.session_state[editor_state_key],
+        use_equivalence_classes,
+    )
+
+    compare_cols = [WISH_RANK, EQUIV_GROUP, PROGRAM] + PRIORITIES + [SAFETY]
+
+    if not edited[compare_cols].astype(str).equals(old[compare_cols].astype(str)):
+        st.session_state[editor_state_key] = edited
+
+        invalidate_simulation_state(
+            simulation_done_key=simulation_done_key,
+            simulation_result_key=simulation_result_key,
+            simulation_student_id_key=simulation_student_id_key,
+        )
+
+        st.rerun()
+
+    return edited
