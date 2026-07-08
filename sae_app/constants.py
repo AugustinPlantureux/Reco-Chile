@@ -69,6 +69,11 @@ COMMUNE_COORDINATES_PATH = DATA_DIR / "commune_coordinates.csv"
 GEOCODING_TIMEOUT_SECONDS = 8
 GEOCODING_USER_AGENT = "sae-admission-risk-simulator/1.0"
 
+# Nominatim's usage policy caps free usage at 1 request/second. This is enforced
+# process-wide in geo.py regardless of how many sessions request geocoding
+# concurrently.
+NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
+
 # Embedded RBD -> Region lookup built from the 2025 individual-level preferences file.
 # This lets the app sort the program dropdown by region without asking users to upload
 # the large individual-level file.

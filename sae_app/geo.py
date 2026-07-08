@@ -8,6 +8,8 @@ wish list.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +22,7 @@ from sae_app.constants import (
     COMMUNE_COORDINATES_PATH,
     GEOCODING_TIMEOUT_SECONDS,
     GEOCODING_USER_AGENT,
+    NOMINATIM_MIN_INTERVAL_SECONDS,
     PROGRAM_LATITUDE,
     PROGRAM_LONGITUDE,
     REGION,
@@ -29,6 +32,21 @@ from sae_app.data_loading import first_existing_column, read_csv_path
 from sae_app.i18n import t
 from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import normalize_geo_key, parse_coordinate
+
+_nominatim_lock = threading.Lock()
+_nominatim_last_call_at = 0.0
+
+
+def _throttle_nominatim() -> None:
+    """Block until at least NOMINATIM_MIN_INTERVAL_SECONDS have passed since the
+    last outbound call, enforced across all sessions in this process.
+    """
+    global _nominatim_last_call_at
+    with _nominatim_lock:
+        wait = _nominatim_last_call_at + NOMINATIM_MIN_INTERVAL_SECONDS - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call_at = time.monotonic()
 
 
 @st.cache_data(show_spinner=False)
@@ -171,6 +189,8 @@ def geocode_chilean_address(address: str) -> dict:
             "Accept": "application/json",
         },
     )
+
+    _throttle_nominatim()
 
     try:
         with urllib.request.urlopen(request, timeout=GEOCODING_TIMEOUT_SECONDS) as response:
