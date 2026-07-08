@@ -13,8 +13,9 @@ import hashlib
 import pandas as pd
 import streamlit as st
 
-from sae_app.constants import EQUIV_GROUP, LOTTERY, PRIORITIES, PROGRAM, REGION, SAFETY, SCHOOL_COMMUNE, SCHOOL_NAME, WISH_RANK
+from sae_app.constants import EQUIV_GROUP, LOTTERY, PRIORITIES, PROGRAM, PROGRAM_DISPLAY_NAME, REGION, SAFETY, SCHOOL_COMMUNE, WISH_RANK
 from sae_app.i18n import t
+from sae_app.program_options import compact_program_label
 from sae_app.session_state import invalidate_simulation_state, update_builder_state
 from sae_app.text_utils import as_bool
 from sae_app.wish_list import make_builder_wish_row, non_empty_wish_rows, normalize_builder_wishes
@@ -56,7 +57,7 @@ def render_wish_list_builder(
             t("Search for a program"),
             options=[""] + add_options,
             key=f"{editor_widget_key_base}_add_program",
-            help=t("Start typing the school name, commune, RBD, or program details."),
+            help=t("Start typing the school name, commune, or program details."),
         )
 
     with add_cols[1]:
@@ -139,16 +140,16 @@ def render_wish_list_builder(
                     group_value = i + 1
 
             with top_cols[1]:
-                st.markdown(f"**{program_label}**")
+                st.markdown(f"**{compact_program_label(program_label)}**")
 
                 if program_label in program_mapping:
                     program_row = program_mapping[program_label]
-                    school = str(program_row.get(SCHOOL_NAME, "")).strip()
+                    program_details = str(program_row.get(PROGRAM_DISPLAY_NAME, "")).strip()
                     commune = str(program_row.get(SCHOOL_COMMUNE, "")).strip()
                     region = str(program_row.get(REGION, "")).strip()
 
                     details = " · ".join(
-                        part for part in [school, commune, region]
+                        part for part in [program_details, commune, region]
                         if part and part.lower() != "nan"
                     )
                     if details:

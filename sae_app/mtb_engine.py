@@ -86,7 +86,8 @@ def mtb_hash(student_id: str, rbd) -> dict:
 def pct_to_rank(percentile: float, n: int) -> int:
     """Convert a 0-best/1-worst percentile into an integer rank among n candidates."""
     n = max(int(n), 1)
-    return int(1 + np.floor(np.clip(percentile, 0, 1) * max(n - 1, 0)))
+    bucket = int(np.floor(np.clip(percentile, 0, 1) * n))
+    return int(1 + min(bucket, n - 1))
 
 
 def attach_mtb_hashes(

@@ -124,27 +124,83 @@ class ProgramRecord:
 # Build program options
 # ---------------------------------------------------------------------------
 
-def make_program_option_label(row: pd.Series, duplicate_count: int = 1) -> str:
-    """Build a readable but still uniquely identifiable dropdown label."""
+def _clean_label_part(value) -> str:
+    """Return a family-facing label part, without placeholder/null text."""
+    text = clean_text(value)
+    if not text or text.lower() == "nan":
+        return ""
+    return text
+
+
+def _school_label_base(row: pd.Series) -> str:
+    """Return the shortest useful school name for a program row."""
+    rbd = str(row["rbd"]).strip()
+    school_name = _clean_label_part(row.get(SCHOOL_NAME, ""))
+    if school_name and school_name != UNKNOWN_SCHOOL_NAME:
+        return school_name
+    return f"RBD {rbd}"
+
+
+def _program_detail_label(row: pd.Series) -> str:
+    """Return the shortest useful program detail for disambiguation."""
+    code = str(row["program_code"]).strip()
+    display_name = _clean_label_part(row.get(PROGRAM_DISPLAY_NAME, ""))
+    if display_name and display_name != UNKNOWN_PROGRAM_NAME:
+        return display_name
+    return f"Program code {code}"
+
+
+def compact_program_label(label: str) -> str:
+    """Simplify legacy full labels for family-facing display.
+
+    New labels are already compact and only include program details when needed
+    to distinguish two options. Older labels always included program details and
+    RBD; those are shortened here when they reach result summaries or the wish
+    cards.
+    """
+    text = str(label or "").strip()
+    if not text:
+        return ""
+    if " · RBD " in text:
+        text = text.split(" · RBD ", 1)[0].strip()
+        if " — " in text:
+            text = text.split(" — ", 1)[0].strip()
+    return text
+
+
+def make_program_option_label(
+    row: pd.Series,
+    *,
+    school_name_count: int = 1,
+    program_count_for_school: int = 1,
+    duplicate_count: int = 1,
+) -> str:
+    """Build a compact but still uniquely identifiable dropdown label.
+
+    Families do not need to see the program track, commune, and RBD repeated on
+    every line. The label starts with the school name and adds details only when
+    they are needed to distinguish otherwise similar options.
+    """
     rbd = str(row["rbd"]).strip()
     code = str(row["program_code"]).strip()
-    school_name = str(row.get(SCHOOL_NAME, "")).strip()
-    commune = str(row.get(SCHOOL_COMMUNE, "")).strip()
-    display_name = str(row.get(PROGRAM_DISPLAY_NAME, "")).strip()
+    commune = _clean_label_part(row.get(SCHOOL_COMMUNE, ""))
 
-    if not school_name or school_name == UNKNOWN_SCHOOL_NAME:
-        school_part = f"RBD {rbd}"
-    elif commune and commune.lower() != "nan":
-        school_part = f"{school_name} ({commune})"
-    else:
-        school_part = school_name
+    label = _school_label_base(row)
 
-    if not display_name or display_name == UNKNOWN_PROGRAM_NAME:
-        display_name = f"Program code {code}"
+    if school_name_count > 1 and commune:
+        label = f"{label} ({commune})"
 
-    label = f"{school_part} — {display_name} · RBD {rbd}"
+    if program_count_for_school > 1:
+        label = f"{label} — {_program_detail_label(row)}"
+
     if duplicate_count > 1:
+        label = f"{label} · RBD {rbd}"
+
+    # Extremely rare final safeguard: two rows can share school, commune, RBD,
+    # and display name while still being distinct program codes.
+    if duplicate_count > 1 and code:
         label = f"{label} · code {code}"
+
     return label
 
 
@@ -155,11 +211,18 @@ def build_options(calib: pd.DataFrame) -> tuple[list[str], dict[str, pd.Series]]
     unique_programs["_region_sort"] = unique_programs[REGION].map(region_sort_index)
     unique_programs["_rbd_sort"] = pd.to_numeric(unique_programs["rbd"], errors="coerce")
     unique_programs["_program_sort"] = pd.to_numeric(unique_programs["program_code"], errors="coerce")
+    unique_programs["_school_label_base"] = unique_programs.apply(_school_label_base, axis=1)
 
-    # A few schools can have multiple distinct program codes with the same readable
-    # reconstructed name. In those cases only, append the code to keep labels unique.
+    school_name_counts = unique_programs["_school_label_base"].value_counts().to_dict()
+    program_counts_by_school = unique_programs.groupby("_school_label_base")["program_code"].nunique().to_dict()
+
     unique_programs["_base_display_label"] = unique_programs.apply(
-        lambda row: make_program_option_label(row, duplicate_count=1),
+        lambda row: make_program_option_label(
+            row,
+            school_name_count=school_name_counts.get(row["_school_label_base"], 1),
+            program_count_for_school=program_counts_by_school.get(row["_school_label_base"], 1),
+            duplicate_count=1,
+        ),
         axis=1,
     )
     duplicate_counts = unique_programs["_base_display_label"].value_counts().to_dict()
@@ -168,9 +231,18 @@ def build_options(calib: pd.DataFrame) -> tuple[list[str], dict[str, pd.Series]]
         ["_region_sort", "_rbd_sort", "_program_sort", REGION, "rbd", "program_code"]
     )
 
+    seen_labels: set[str] = set()
     for _, row in unique_programs.iterrows():
         base_label = row["_base_display_label"]
-        label = make_program_option_label(row, duplicate_counts.get(base_label, 1))
+        label = make_program_option_label(
+            row,
+            school_name_count=school_name_counts.get(row["_school_label_base"], 1),
+            program_count_for_school=program_counts_by_school.get(row["_school_label_base"], 1),
+            duplicate_count=duplicate_counts.get(base_label, 1),
+        )
+        if label in seen_labels:
+            label = f"{label} · code {str(row['program_code']).strip()}"
+        seen_labels.add(label)
         options.append(label)
         mapping[label] = row
 

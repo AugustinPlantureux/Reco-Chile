@@ -15,7 +15,7 @@ import pandas as pd
 
 from sae_app.constants import EQUIV_GROUP, LOTTERY, PRIORITIES, PROGRAM, SAFETY, WISH_RANK
 from sae_app.data_loading import read_csv
-from sae_app.i18n import t
+from sae_app.i18n import display_outcome_label, t
 from sae_app.text_utils import as_bool, norm_code
 
 # ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ def predicted_outcome_final_chance(choices: pd.DataFrame, outcome: str) -> float
     return float(match["choice_assignment_probability"].iloc[0])
 
 def compact_order_label(order_df: pd.DataFrame, max_items: int = 5) -> str:
-    programs = order_df[PROGRAM].astype(str).str.strip().tolist()
+    programs = [display_outcome_label(p) for p in order_df[PROGRAM].astype(str).str.strip().tolist()]
     if len(programs) <= max_items:
         return " → ".join(programs)
     return " → ".join(programs[:max_items]) + f" → … (+{len(programs) - max_items})"

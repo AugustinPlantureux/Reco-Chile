@@ -66,7 +66,7 @@ def format_display_table(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     for col in out.columns:
-        if col == "Predicted outcome":
+        if col in {"Program", "Predicted outcome"}:
             out[col] = out[col].map(display_outcome_label)
         elif col == "Flagged at risk":
             out[col] = out[col].map(lambda x: t("Yes") if bool(x) else t("No"))

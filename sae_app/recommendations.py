@@ -75,6 +75,11 @@ RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT = 2.25
 RECOMMENDATION_MIN_SIMILARITY_SCORE = 0.12
 RECOMMENDATION_PROXIMITY_WEIGHT = 0.75
 RECOMMENDATION_DISTANCE_SCALE_KM = 50.0
+# When a home address is provided, keep recommendations family-realistic by
+# excluding schools farther than this straight-line distance from the geocoded
+# home location. Without a home address, proximity still uses the current
+# wish-list centroid and this hard cap is not applied.
+RECOMMENDATION_MAX_HOME_DISTANCE_KM = 100.0
 RECOMMENDATION_DIVERSIFY = True
 RECOMMENDATION_DIVERSITY_STRENGTH = 0.35
 
@@ -490,6 +495,7 @@ def recommend_similar_programs(
     proximity_weight: float = RECOMMENDATION_PROXIMITY_WEIGHT,
     distance_scale_km: float = RECOMMENDATION_DISTANCE_SCALE_KM,
     home_geo_reference: dict | None = None,
+    max_home_distance_km: float | None = RECOMMENDATION_MAX_HOME_DISTANCE_KM,
     risk_optimization_weight: float = RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT,
     min_similarity_score: float = RECOMMENDATION_MIN_SIMILARITY_SCORE,
     diversify: bool = RECOMMENDATION_DIVERSIFY,
@@ -575,6 +581,13 @@ def recommend_similar_programs(
 
             lat, lon, _ = program_coordinates(program)
             distance_km = haversine_km(ref_lat, ref_lon, lat, lon)
+            if use_home_reference and max_home_distance_km is not None:
+                # If the family gave a home address, do not recommend schools
+                # that are too far away to be realistic family-facing options.
+                # This is a hard eligibility filter, not just a scoring weight.
+                if not np.isfinite(distance_km) or distance_km > float(max_home_distance_km):
+                    continue
+
             proximity_score = proximity_from_distance(distance_km, distance_scale_km=distance_scale_km)
 
             capacity = max(program.capacity, 0.0)

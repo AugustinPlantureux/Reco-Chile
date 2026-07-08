@@ -15,6 +15,11 @@ from sae_app.i18n import display_outcome_label, t
 from sae_app.ui_common import format_display_table
 
 
+# If compatible strict orders keep the same predicted school but change its
+# final chance by at least 0.5 percentage point, show an intermediate warning.
+EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD = 0.005
+
+
 def format_choices_table(choices):
     display_cols = [
         "wish_rank",
@@ -28,6 +33,7 @@ def format_choices_table(choices):
     ]
 
     table = choices[display_cols].copy()
+    table["program"] = table["program"].map(display_outcome_label)
     table["priority_tier"] = table["priority_tier"].map(t)
     for prob_col in ("availability_probability", "choice_assignment_probability"):
         table[prob_col] = table[prob_col].astype(float).map(lambda x: f"{x:.1%}")
@@ -80,7 +86,7 @@ def render_single_summary(
             st.markdown(t("**Most likely outcomes:**"))
             st.write(f"1. {t('Unmatched')}")
             for i, row in positive.head(2).iterrows():
-                st.write(f"{i + 2}. {row['program']}")
+                st.write(f"{i + 2}. {display_outcome_label(row['program'])}")
             st.caption(
                 t("The schools listed below Unmatched are still the most likely school assignments, but the unmatched risk is high enough to be treated as the main warning.")
             )
@@ -93,13 +99,13 @@ def render_single_summary(
         st.warning(
             t(
                 "Moderate unmatched-risk warning: the most likely assignment is **{program}**, but the unmatched risk is high enough to appear in the podium.",
-                program=best["program"],
+                program=display_outcome_label(best["program"]),
             )
         )
 
         podium = [
             {
-                "label": str(row["program"]),
+                "label": display_outcome_label(row["program"]),
                 "probability": float(row["choice_assignment_probability"]),
                 "is_unmatched": False,
             }
@@ -136,7 +142,7 @@ def render_single_summary(
             st.success(
                 t(
                     "The student is not flagged as at risk. The most likely assignment is: **{program}**.",
-                    program=best["program"],
+                    program=display_outcome_label(best["program"]),
                 )
             )
             st.caption(
@@ -144,7 +150,7 @@ def render_single_summary(
             )
             st.markdown(t("**Top 3 most likely schools:**"))
             for i, row in positive.head(3).iterrows():
-                st.write(f"{i + 1}. {row['program']}")
+                st.write(f"{i + 1}. {display_outcome_label(row['program'])}")
 
 
 def render_simulation_result(result: dict) -> None:
@@ -176,7 +182,40 @@ def render_simulation_result(result: dict) -> None:
         render_single_summary(reference_choices, hard_threshold_used, soft_threshold_used)
 
         st.subheader(t("Equivalence-class sensitivity"))
-        if len(distinct_outcomes) == 1:
+
+        predicted_chance_values = []
+        if "Predicted outcome final chance" in variants_df.columns:
+            for value in variants_df["Predicted outcome final chance"].dropna().tolist():
+                try:
+                    predicted_chance_values.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+
+        predicted_chance_min = min(predicted_chance_values) if predicted_chance_values else None
+        predicted_chance_max = max(predicted_chance_values) if predicted_chance_values else None
+        predicted_chance_range = (
+            predicted_chance_max - predicted_chance_min
+            if predicted_chance_min is not None and predicted_chance_max is not None
+            else 0.0
+        )
+        same_outcome_but_probability_changes = (
+            len(distinct_outcomes) == 1
+            and predicted_chance_range >= EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD
+        )
+
+        if len(distinct_outcomes) == 1 and same_outcome_but_probability_changes:
+            st.warning(
+                t(
+                    "The strict ordering inside the equivalence classes does not change the most likely school: **{outcome}**. However, it changes the final assignment probability for that school, from {min_chance:.1%} to {max_chance:.1%} across compatible strict order(s).",
+                    outcome=display_outcome_label(distinct_outcomes[0]),
+                    min_chance=predicted_chance_min,
+                    max_chance=predicted_chance_max,
+                )
+            )
+            st.caption(
+                t("Changing the internal order does not change the main predicted school, but it can still affect the chances of receiving other options. The overall unmatched risk remains unchanged, so the family should still choose the internal order carefully.")
+            )
+        elif len(distinct_outcomes) == 1:
             st.success(
                 t(
                     "The strict ordering inside the equivalence classes does not change the predicted final outcome. All {n:,} compatible strict order(s) lead to: **{outcome}**.",

@@ -24,6 +24,7 @@ from sae_app.recommendations import (
     RECOMMENDATION_PROXIMITY_WEIGHT,
     RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT,
     RECOMMENDATION_MIN_SIMILARITY_SCORE,
+    RECOMMENDATION_MAX_HOME_DISTANCE_KM,
     current_unmatched_risk_from_simulation_result,
     recommend_similar_programs,
 )
@@ -96,6 +97,9 @@ def render_similar_program_recommendations(
         st.caption(
             t("Recommended programs assume no special priority flags for the newly added school. If the student has a sibling, priority-student quota, civil-servant, former-student, or already-enrolled priority for that school, add the program to the list and mark the priority before rerunning the simulation.")
         )
+        st.info(
+            t("Strategic note: adding additional acceptable programs at the end of the wish list does not reduce the student's chance of getting higher-ranked choices. The assignment process considers the list in order and keeps the best available option. Families should therefore add every acceptable backup program, then mark any applicable priority for those added schools and rerun the simulation.")
+        )
 
         st.markdown(t("#### Home address for distance calculation"))
         st.caption(
@@ -145,6 +149,14 @@ def render_similar_program_recommendations(
         elif normalized_current_address and stored_geo:
             st.info(t("Address changed. Click the button to update the coordinates."))
 
+        if home_geo_reference:
+            st.caption(
+                t(
+                    "With a home address, recommendations are limited to programs within {max_distance:.0f} km of the geocoded location.",
+                    max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
+                )
+            )
+
         rec_max = st.slider(
             t("Number of recommendations"),
             min_value=2,
@@ -168,14 +180,7 @@ def render_similar_program_recommendations(
         diversify = RECOMMENDATION_DIVERSIFY
         diversity_strength = RECOMMENDATION_DIVERSITY_STRENGTH if diversify else 0.0
 
-        # Optional technical explanation for debugging/developer use.
-        # Hidden from the family-facing UI by default.
-        # Uncomment this caption if you want to explain the inferred weights again.
-        # st.caption(
-        #     t("Recommendation weights are inferred automatically from the submitted wish list. Automatic weights account for both dominance and criterion coverage, so a criterion observed for only one wish no longer dominates the profile by accident.")
-        # )
-
-        recommendations, profile_table = recommend_similar_programs(
+        recommendations, _profile_table = recommend_similar_programs(
             edited,
             program_mapping,
             student_id=student_id,
@@ -187,24 +192,25 @@ def render_similar_program_recommendations(
             proximity_weight=proximity_weight,
             distance_scale_km=float(distance_scale_km),
             home_geo_reference=home_geo_reference,
+            max_home_distance_km=RECOMMENDATION_MAX_HOME_DISTANCE_KM if home_geo_reference else None,
             risk_optimization_weight=risk_optimization_weight,
             min_similarity_score=RECOMMENDATION_MIN_SIMILARITY_SCORE,
             diversify=diversify,
             diversity_strength=diversity_strength,
         )
 
-        # Optional technical profile table for debugging/developer use.
-        # Hidden from the family-facing UI by default.
-        # Uncomment this block if you want families/developers to see the criteria
-        # inferred from the current wish list again.
-        # if not profile_table.empty:
-        #     st.markdown(t("#### Main criteria inferred from the wish list"))
-        #     st.dataframe(format_display_table(profile_table), width="stretch", hide_index=True)
-
         if recommendations.empty:
-            st.warning(
-                t("No similar program was found under the current proximity/scoring rules.")
-            )
+            if home_geo_reference:
+                st.warning(
+                    t(
+                        "No recommended program was found within {max_distance:.0f} km under the current scoring rules. You can still add nearby schools manually, or increase the home-distance limit in sae_app/recommendations.py if the family is willing to travel farther.",
+                        max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
+                    )
+                )
+            else:
+                st.warning(
+                    t("No similar program was found under the current proximity/scoring rules.")
+                )
             return
 
         if (

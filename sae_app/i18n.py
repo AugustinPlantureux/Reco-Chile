@@ -58,6 +58,7 @@ TRANSLATIONS = {
         "#### Add programs": "#### Agregar programas",
         "Search for a program": "Buscar un programa",
         "Start typing the school name, commune, RBD, or program details.": "Empieza a escribir el nombre del establecimiento, comuna, RBD o detalles del programa.",
+        "Start typing the school name, commune, or program details.": "Empieza a escribir el nombre del establecimiento, comuna o detalles del programa.",
         "Add": "Agregar",
         "No program selected yet. Add the student's first wish above.": "Todavía no hay ningún programa seleccionado. Agrega arriba la primera preferencia del estudiante.",
         "#### Current wish list": "#### Lista de preferencias actual",
@@ -126,6 +127,8 @@ TRANSLATIONS = {
         "Predicted outcome final chance": "Probabilidad final del resultado previsto",
         "How to read this table: the overall unmatched risk is unchanged across compatible strict orders because the same programs are being tested. What can change is the most likely school assignment and its final chance.": "Cómo leer esta tabla: el riesgo global de quedar sin cupo no cambia entre los órdenes estrictos compatibles, porque se prueban los mismos programas. Lo que puede cambiar es el establecimiento más probable y su probabilidad final.",
         "Changing the internal order can lead to different predicted schools. The overall unmatched risk remains unchanged; only the distribution of assignment probabilities across schools changes.": "Cambiar el orden interno puede llevar a establecimientos previstos distintos. El riesgo global de quedar sin cupo se mantiene igual; solo cambia la distribución de probabilidades de asignación entre establecimientos.",
+        "The strict ordering inside the equivalence classes does not change the most likely school: **{outcome}**. However, it changes the final assignment probability for that school, from {min_chance:.1%} to {max_chance:.1%} across compatible strict order(s).": "El orden estricto dentro de las clases de equivalencia no cambia el establecimiento más probable: **{outcome}**. Sin embargo, sí cambia la probabilidad final de asignación a ese establecimiento, desde {min_chance:.1%} hasta {max_chance:.1%} entre los órdenes estrictos compatibles.",
+        "Changing the internal order does not change the main predicted school, but it can still affect the chances of receiving other options. The overall unmatched risk remains unchanged, so the family should still choose the internal order carefully.": "Cambiar el orden interno no cambia el establecimiento principal previsto, pero sí puede afectar las probabilidades de recibir otras opciones. El riesgo global de quedar sin cupo se mantiene igual, por lo que la familia debería elegir igualmente con cuidado el orden interno.",
         "Changing the internal order does not change the predicted school. The overall unmatched risk also remains unchanged across compatible orders.": "Cambiar el orden interno no cambia el establecimiento previsto. El riesgo global de quedar sin cupo también se mantiene igual entre órdenes compatibles.",
         "Strict order #": "Orden estricto #",
         "Predicted outcome": "Resultado previsto",
@@ -184,6 +187,7 @@ TRANSLATIONS = {
         "Recommendation weights are inferred automatically from the submitted wish list. Automatic weights account for both dominance and criterion coverage, so a criterion observed for only one wish no longer dominates the profile by accident.": "Los pesos de recomendación se infieren automáticamente desde la lista de preferencias. Los pesos automáticos consideran tanto la dominancia como la cobertura del criterio, por lo que un criterio observado en una sola preferencia ya no domina el perfil por accidente.",
         "#### Main criteria inferred from the wish list": "#### Criterios principales inferidos desde la lista",
         "No similar program was found under the current proximity/scoring rules.": "No se encontró ningún programa similar con las reglas actuales de proximidad y score.",
+        "No recommended program was found within {max_distance:.0f} km under the current scoring rules. You can still add nearby schools manually, or increase the home-distance limit in sae_app/recommendations.py if the family is willing to travel farther.": "No se encontró ningún programa recomendado dentro de {max_distance:.0f} km con las reglas actuales de puntuación. La familia puede agregar manualmente establecimientos cercanos, o aumentar el límite de distancia al hogar en sae_app/recommendations.py si está dispuesta a viajar más lejos.",
         "The current list does not contain enough usable information to infer clear similar-program preferences. The suggestions below are therefore based mainly on distance and admission-risk reduction.": "La lista actual no contiene suficiente información utilizable para inferir preferencias claras de programas similares. Por eso, las sugerencias de abajo se basan principalmente en distancia y reducción del riesgo de admisión.",
         "#### Suggested programs": "#### Programas sugeridos",
         "Add recommended programs to the wish list": "Agregar programas recomendados a la lista",
@@ -225,6 +229,7 @@ TRANSLATIONS = {
         "#### Portfolio-risk optimization": "Optimización del riesgo del portafolio",
         "Each recommended program is evaluated as if it were appended after the current wish list. The table estimates the student's chance of getting that added program; for a marginal append, this is also the reduction in unmatched risk.": "Cada programa recomendado se evalúa como si se agregara después de la lista actual. La tabla estima la probabilidad de que el estudiante obtenga ese programa agregado; para una adición marginal, esto también equivale a la reducción del riesgo sin cupo.",
         "Recommended programs assume no special priority flags for the newly added school. If the student has a sibling, priority-student quota, civil-servant, former-student, or already-enrolled priority for that school, add the program to the list and mark the priority before rerunning the simulation.": "Las recomendaciones suponen que el nuevo establecimiento agregado no tiene prioridades especiales marcadas. Si el estudiante tiene prioridad por hermano/a, estudiante prioritario, funcionario/a, exalumno/a o ya matriculado en ese establecimiento, agrega el programa a la lista y marca la prioridad antes de volver a ejecutar la simulación.",
+        "Strategic note: adding additional acceptable programs at the end of the wish list does not reduce the student's chance of getting higher-ranked choices. The assignment process considers the list in order and keeps the best available option. Families should therefore add every acceptable backup program, then mark any applicable priority for those added schools and rerun the simulation.": "Nota estratégica: agregar programas adicionales aceptables al final de la lista de preferencias no reduce la probabilidad de obtener opciones mejor rankeadas. El proceso de asignación considera la lista en orden y conserva la mejor opción disponible. Por eso, las familias deberían agregar todos los programas de respaldo aceptables, luego marcar cualquier prioridad aplicable para esos establecimientos agregados y volver a ejecutar la simulación.",
         "Current unmatched risk": "Riesgo actual sin cupo",
         "Chance if considered": "Probabilidad si es considerado",
         "Estimated final chance if appended": "Probabilidad final estimada si se agrega",
@@ -239,6 +244,7 @@ TRANSLATIONS = {
         "Distances will be computed from: {address}": "Las distancias se calcularán desde: {address}",
         "Address could not be geocoded: {error}": "No se pudo geocodificar la dirección: {error}",
         "Address changed. Click the button to update the coordinates.": "La dirección cambió. Haz clic en el botón para actualizar las coordenadas.",
+        "With a home address, recommendations are limited to programs within {max_distance:.0f} km of the geocoded location.": "Con una dirección del hogar, las recomendaciones se limitan a programas dentro de {max_distance:.0f} km de la ubicación geocodificada.",
         "Enter an address, then click the button to compute recommendation distances from home instead of the current wish-list centroid.": "Ingresa una dirección y luego haz clic en el botón para calcular las distancias desde el hogar en lugar del centro de la lista actual.",
         "Distance from home (km)": "Distancia desde el hogar (km)",
         "Home address": "Dirección del hogar",
@@ -266,8 +272,15 @@ def format_option_label(value) -> str:
 
 
 def display_outcome_label(value) -> str:
-    text = str(value)
-    return t("Unmatched") if text == "Unmatched" else text
+    """Return a family-facing outcome label."""
+    text = str(value).strip()
+    if text == "Unmatched":
+        return t("Unmatched")
+    if " · RBD " in text:
+        text = text.split(" · RBD ", 1)[0].strip()
+        if " — " in text:
+            text = text.split(" — ", 1)[0].strip()
+    return text
 
 
 def initialize_language_selector() -> None:
