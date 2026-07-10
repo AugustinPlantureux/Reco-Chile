@@ -30,7 +30,6 @@ def render_wish_list_builder(
     use_equivalence_classes: bool,
     simulation_done_key: str | None = None,
     simulation_result_key: str | None = None,
-    simulation_student_id_key: str | None = None,
 ) -> pd.DataFrame:
     """
     Friendlier wish-list input UI.
@@ -94,7 +93,6 @@ def render_wish_list_builder(
             use_equivalence_classes=use_equivalence_classes,
             simulation_done_key=simulation_done_key,
             simulation_result_key=simulation_result_key,
-            simulation_student_id_key=simulation_student_id_key,
         )
 
     if current_non_empty.empty:
@@ -174,7 +172,6 @@ def render_wish_list_builder(
                             use_equivalence_classes=use_equivalence_classes,
                             simulation_done_key=simulation_done_key,
                             simulation_result_key=simulation_result_key,
-                            simulation_student_id_key=simulation_student_id_key,
                         )
 
             with top_cols[3]:
@@ -196,7 +193,6 @@ def render_wish_list_builder(
                             use_equivalence_classes=use_equivalence_classes,
                             simulation_done_key=simulation_done_key,
                             simulation_result_key=simulation_result_key,
-                            simulation_student_id_key=simulation_student_id_key,
                         )
 
             with top_cols[4]:
@@ -213,7 +209,6 @@ def render_wish_list_builder(
                         use_equivalence_classes=use_equivalence_classes,
                         simulation_done_key=simulation_done_key,
                         simulation_result_key=simulation_result_key,
-                        simulation_student_id_key=simulation_student_id_key,
                     )
 
             prio_cols = st.columns(5)
@@ -274,7 +269,6 @@ def render_wish_list_builder(
         invalidate_simulation_state(
             simulation_done_key=simulation_done_key,
             simulation_result_key=simulation_result_key,
-            simulation_student_id_key=simulation_student_id_key,
         )
 
         st.rerun()

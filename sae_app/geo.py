@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 
 from sae_app.constants import (
+    CHILE_COORDINATE_ZONES,
     COMMUNE_COORDINATES_PATH,
     GEOCODING_TIMEOUT_SECONDS,
     GEOCODING_USER_AGENT,
@@ -29,37 +30,52 @@ from sae_app.constants import (
     REGION,
     REGION_CENTROIDS,
 )
-from sae_app.data_loading import first_existing_column, read_csv_path
+from sae_app.data_loading import PROGRAM_COORDINATE_SOURCE, first_existing_column, read_csv
 from sae_app.i18n import t
 from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import normalize_geo_key, parse_coordinate
 
 
-@st.cache_data(show_spinner=False)
 def load_commune_coordinates() -> pd.DataFrame:
-    """Load optional commune coordinates for continuous proximity scoring.
-
-    Expected columns in data/commune_coordinates.csv:
-    - commune
-    - region or Region
-    - latitude/lat/latitud
-    - longitude/lon/lng/longitud
-
-    If the file is absent, the recommendation engine falls back to approximate
-    regional centroids. This keeps the app runnable without adding a new data
-    dependency, while making it easy to improve proximity later.
-    """
+    """Load commune coordinates, caching by the file's actual contents."""
     if not COMMUNE_COORDINATES_PATH.exists():
-        return pd.DataFrame(columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE])
+        return pd.DataFrame(
+            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
+        )
+    file_bytes = COMMUNE_COORDINATES_PATH.read_bytes()
+    if not file_bytes.strip():
+        return pd.DataFrame(
+            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
+        )
+    return _load_commune_coordinates(file_bytes)
 
-    df = read_csv_path(COMMUNE_COORDINATES_PATH, sep="auto")
+
+@st.cache_data(show_spinner=False)
+def _load_commune_coordinates(file_bytes: bytes) -> pd.DataFrame:
+    """Parse optional commune coordinates using one coherent coordinate pair."""
+    if not file_bytes.strip():
+        return pd.DataFrame(
+            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
+        )
+    df = read_csv(file_bytes, sep="auto")
     commune_col = first_existing_column(df, ["commune", "comuna", "school_commune"])
     region_col = first_existing_column(df, [REGION, "region", "región"])
-    lat_col = first_existing_column(df, ["latitude", "lat", "latitud"])
-    lon_col = first_existing_column(df, ["longitude", "lon", "lng", "longitud"])
+
+    coordinate_pairs = [
+        ("latitude", "longitude"),
+        ("lat", "lon"),
+        ("lat", "lng"),
+        ("latitud", "longitud"),
+    ]
+    lat_col, lon_col = next(
+        ((lat, lon) for lat, lon in coordinate_pairs if lat in df.columns and lon in df.columns),
+        (None, None),
+    )
 
     if not commune_col or not lat_col or not lon_col:
-        return pd.DataFrame(columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE])
+        return pd.DataFrame(
+            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
+        )
 
     out = pd.DataFrame({
         "commune_key": df[commune_col].map(normalize_geo_key),
@@ -67,32 +83,96 @@ def load_commune_coordinates() -> pd.DataFrame:
         PROGRAM_LATITUDE: df[lat_col].map(parse_coordinate),
         PROGRAM_LONGITUDE: df[lon_col].map(parse_coordinate),
     })
-    out = out.dropna(subset=[PROGRAM_LATITUDE, PROGRAM_LONGITUDE])
+    valid_mask = [valid_lat_lon(lat, lon) for lat, lon in zip(
+        out[PROGRAM_LATITUDE], out[PROGRAM_LONGITUDE]
+    )]
+    out = out.loc[valid_mask].copy()
     out = out.drop_duplicates(["commune_key", "region_key"])
     return out
 
 
+# The former mainland-only check rejected Rapa Nui and Juan Fernández.
+# The shared zones in constants.py keep ingestion and distance validation aligned.
+def _inside_coordinate_zone(
+    lat: float,
+    lon: float,
+    zone: tuple[str, float, float, float, float],
+) -> bool:
+    """Return whether a coordinate lies inside one configured Chile zone."""
+    _, min_lat, max_lat, min_lon, max_lon = zone
+    return min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
+
+
 def valid_lat_lon(lat, lon) -> bool:
+    """Return True for finite coordinates in mainland or insular Chile."""
     try:
         lat = float(lat)
         lon = float(lon)
-    except Exception:
+    except (TypeError, ValueError):
         return False
-    return np.isfinite(lat) and np.isfinite(lon) and -56 <= lat <= -17 and -76 <= lon <= -66
+
+    if not (np.isfinite(lat) and np.isfinite(lon)):
+        return False
+
+    return any(_inside_coordinate_zone(lat, lon, zone) for zone in CHILE_COORDINATE_ZONES)
+
+
+def commune_coordinate_lookup() -> dict[tuple[str, str], tuple[float, float]]:
+    """Return the commune lookup, caching by the coordinate file's contents."""
+    if not COMMUNE_COORDINATES_PATH.exists():
+        return {}
+    file_bytes = COMMUNE_COORDINATES_PATH.read_bytes()
+    if not file_bytes.strip():
+        return {}
+    return _commune_coordinate_lookup(file_bytes)
 
 
 @st.cache_data(show_spinner=False)
-def commune_coordinate_lookup() -> dict[tuple[str, str], tuple[float, float]]:
-    coords = load_commune_coordinates()
+def _commune_coordinate_lookup(
+    file_bytes: bytes,
+) -> dict[tuple[str, str], tuple[float, float]]:
+    coords = _load_commune_coordinates(file_bytes)
     if coords.empty:
         return {}
     return {
-        (str(row["commune_key"]), str(row["region_key"])): (float(row[PROGRAM_LATITUDE]), float(row[PROGRAM_LONGITUDE]))
+        (str(row["commune_key"]), str(row["region_key"])): (
+            float(row[PROGRAM_LATITUDE]),
+            float(row[PROGRAM_LONGITUDE]),
+        )
         for _, row in coords.iterrows()
     }
 
 
-def program_coordinates(program: ProgramRecord) -> tuple[float, float, str]:
+RELIABLE_PROGRAM_COORDINATE_SOURCES = frozenset({
+    "program coordinate",
+    "commune coordinate",
+})
+RELIABLE_HOME_GEOCODING_PRECISIONS = frozenset({"address", "street"})
+
+
+def program_coordinate_source_is_reliable(source: str) -> bool:
+    return str(source or "").strip() in RELIABLE_PROGRAM_COORDINATE_SOURCES
+
+
+def home_geocoding_supports_hard_filter(home_geo_reference: dict | None) -> bool:
+    precision = str((home_geo_reference or {}).get("precision", "")).strip().lower()
+    return precision in RELIABLE_HOME_GEOCODING_PRECISIONS
+
+
+def home_distance_filter_is_reliable(
+    home_geo_reference: dict | None,
+    program_coordinate_source: str,
+) -> bool:
+    return (
+        home_geocoding_supports_hard_filter(home_geo_reference)
+        and program_coordinate_source_is_reliable(program_coordinate_source)
+    )
+
+
+def program_coordinates(
+    program: ProgramRecord,
+    commune_lookup: dict[tuple[str, str], tuple[float, float]] | None = None,
+) -> tuple[float, float, str]:
     """Return best available coordinates for one program.
 
     Priority:
@@ -101,11 +181,14 @@ def program_coordinates(program: ProgramRecord) -> tuple[float, float, str]:
     3. approximate region centroid.
     """
     if valid_lat_lon(program.program_latitude, program.program_longitude):
-        return float(program.program_latitude), float(program.program_longitude), "program coordinate"
+        source = str(program.raw.get(PROGRAM_COORDINATE_SOURCE, "")).strip()
+        if source not in RELIABLE_PROGRAM_COORDINATE_SOURCES:
+            source = "program coordinate"
+        return float(program.program_latitude), float(program.program_longitude), source
 
     commune = normalize_geo_key(program.school_commune)
     region = normalize_geo_key(program.region)
-    lookup = commune_coordinate_lookup()
+    lookup = commune_lookup if commune_lookup is not None else commune_coordinate_lookup()
     for key in [(commune, region), (commune, "")]:
         if key in lookup:
             lat, lon = lookup[key]

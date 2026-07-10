@@ -17,8 +17,6 @@ from scipy.stats import hypergeom
 
 from sae_app.constants import (
     CAPACITY,
-    HASH_HEX,
-    HASH_INPUT,
     HASH_PCT,
     IMPUT_METHOD,
     IMPUTED,
@@ -27,66 +25,133 @@ from sae_app.constants import (
     NO_PRIORITY,
     POP,
     PRIORITIES,
-    PRIORITY_STUDENT_QUOTA,
+    PRIORITY_STUDENT_SEATS,
     PROGRAM,
     SAFETY,
     TRUE_APP,
     WISH_RANK,
 )
-from sae_app.i18n import t
+from sae_app.errors import EmptyWishList, InvalidStudentIdentifier, UnknownProgram
 from sae_app.text_utils import as_bool, as_float, norm_code_value
 
 # ---------------------------------------------------------------------------
 # Hash MTB (SHA-256 RUN/IPE + RBD)
 # ---------------------------------------------------------------------------
 
+def _clean_identifier_input(student_id: str) -> str:
+    """Return a whitespace-free, uppercase identifier or raise if it is empty."""
+    raw = re.sub(r"\s+", "", str(student_id).strip().upper())
+    if not raw:
+        raise InvalidStudentIdentifier("Enter the student RUN/IPE before running the MTB calculation.")
+    return raw
+
+
+def _run_check_digit(body: str) -> str:
+    """Return the modulo-11 check digit for a RUN numeric body."""
+    total = 0
+    multiplier = 2
+    for digit in reversed(body):
+        total += int(digit) * multiplier
+        multiplier = 2 if multiplier == 7 else multiplier + 1
+
+    result = 11 - (total % 11)
+    if result == 11:
+        return "0"
+    if result == 10:
+        return "K"
+    return str(result)
+
+
 def normalize_run(student_id: str) -> str:
-    """Normalize a Chilean RUN/IPE before hashing.
+    """Validate and canonicalize a Chilean RUN before hashing.
 
-    Removes dots and spaces, uppercases K, and keeps the hyphen.
-    Raises ValueError if the identifier is empty or contains invalid characters.
+    Dots and the hyphen are accepted as optional input formatting. The returned
+    value always uses the canonical ``numeric_body-check_digit`` representation.
     """
-    cleaned = str(student_id).strip().upper().replace(".", "")
-    cleaned = re.sub(r"\s+", "", cleaned)
-    if not cleaned:
-        raise ValueError(t("Enter the student RUN/IPE before running the MTB calculation."))
-    if not re.fullmatch(r"[0-9K\-]+", cleaned):
-        raise ValueError(
-            t("The RUN/IPE may contain only digits, one optional hyphen, and the letter K.")
+    raw = _clean_identifier_input(student_id)
+    match = re.fullmatch(
+        r"(?:(?P<plain>\d{1,8})|(?P<dotted>\d{1,2}(?:\.\d{3}){1,2}))"
+        r"-?(?P<check>[0-9K])",
+        raw,
+    )
+    if match is None:
+        raise InvalidStudentIdentifier(
+            "Invalid RUN format. Enter the numeric body plus its check digit, "
+            "for example 12.345.678-5. Dots and the hyphen are optional."
         )
-    return cleaned
+
+    body = (match.group("plain") or match.group("dotted")).replace(".", "")
+    if int(body) == 0:
+        raise InvalidStudentIdentifier(
+            "Invalid RUN format. Enter the numeric body plus its check digit, "
+            "for example 12.345.678-5. Dots and the hyphen are optional."
+        )
+
+    check_digit = match.group("check")
+    expected = _run_check_digit(body)
+    if check_digit != expected:
+        raise InvalidStudentIdentifier("The RUN check digit is invalid.")
+
+    return f"{int(body)}-{check_digit}"
 
 
-def mtb_hash(student_id: str, rbd) -> dict:
-    """Compute the deterministic lottery percentile for a (student, school) pair.
+def normalize_ipe(student_id: str) -> str:
+    """Validate and canonicalize an IPE before hashing.
 
-    SHA-256 returns a value between 0 and MAX_SHA256.
-    The official priority direction is larger = better; it is converted into a
-    0-best/1-worst percentile to match the model convention.
-
-    Returns a dict with HASH_INPUT, HASH_HEX, HASH_PCT, and priority_percentile.
+    An IPE uses a nine-digit numeric body from the 100-million series followed
+    by a numeric verifier digit. Dots and the hyphen are accepted as optional
+    input formatting; the returned value always uses ``body-verifier``.
     """
-    norm_id  = normalize_run(student_id)
+    raw = _clean_identifier_input(student_id)
+    match = re.fullmatch(
+        r"(?:(?P<plain>\d{9})|(?P<dotted>\d{3}(?:\.\d{3}){2}))"
+        r"-?(?P<check>\d)",
+        raw,
+    )
+    if match is None:
+        raise InvalidStudentIdentifier(
+            "Invalid IPE format. Enter the nine-digit IPE plus its numeric "
+            "verifier digit, for example 111222333-4. Dots and the hyphen are optional."
+        )
+
+    body = (match.group("plain") or match.group("dotted")).replace(".", "")
+    return f"{body}-{match.group('check')}"
+
+
+def normalize_student_identifier(student_id: str) -> str:
+    """Dispatch to the strict RUN or IPE parser and return a canonical value."""
+    raw = _clean_identifier_input(student_id)
+    compact = raw.replace(".", "").replace("-", "")
+    if len(compact) == 10:
+        return normalize_ipe(raw)
+    return normalize_run(raw)
+
+
+def mtb_hash(student_id: str, rbd) -> float:
+    """Return the deterministic 0-best/1-worst MTB lottery percentile.
+
+    The SHA-256 input and digest exist only as local temporaries and are never
+    returned or attached to a DataFrame.
+    """
+    norm_id = normalize_student_identifier(student_id)
     norm_rbd = norm_code_value(rbd)
-    hash_input = f"{norm_id}{norm_rbd}"
-    hex_digest  = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
-    decimal     = int(hex_digest, 16)
-
-    priority_pct = decimal / MAX_SHA256          # 1 = best
-    lottery_pct  = 1.0 - priority_pct            # 0 = best
-
-    return {
-        HASH_INPUT: hash_input,
-        HASH_HEX:   hex_digest,
-        HASH_PCT:   float(np.clip(lottery_pct, 0, 1)),
-        "priority_percentile": float(np.clip(priority_pct, 0, 1)),
-    }
+    digest = hashlib.sha256(f"{norm_id}{norm_rbd}".encode("utf-8")).digest()
+    priority_pct = int.from_bytes(digest, byteorder="big") / MAX_SHA256
+    return float(np.clip(1.0 - priority_pct, 0, 1))
 
 
 def pct_to_rank(percentile: float, n: int) -> int:
-    """Convert a 0-best/1-worst percentile into an integer rank among n candidates."""
+    """Convert a 0-best/1-worst percentile into one of the ranks 1..n.
+
+    The unit interval is divided into ``n`` equal-width bins:
+    [0, 1/n) -> rank 1, ..., [(n - 1)/n, 1] -> rank n.
+
+    Multiplying by ``n - 1`` would make the final rank reachable only at an
+    exact percentile of 1, systematically biasing ranks in the student's favor.
+    """
     n = max(int(n), 1)
-    return int(1 + np.floor(np.clip(percentile, 0, 1) * max(n - 1, 0)))
+    percentile = float(np.clip(percentile, 0, 1))
+    return min(int(np.floor(percentile * n)) + 1, n)
 
 
 def attach_mtb_hashes(
@@ -95,25 +160,26 @@ def attach_mtb_hashes(
     student_id: str,
 ) -> pd.DataFrame:
     """Compute and attach the MTB percentile to each valid wish."""
-    out = wishes.copy()
-    for col in (HASH_INPUT, HASH_HEX, HASH_PCT):
-        if col not in out.columns:
-            out[col] = np.nan if col == HASH_PCT else ""
+    # Drop legacy sensitive columns if an old in-memory DataFrame is reused.
+    out = wishes.drop(
+        columns=["lottery_hash_input", "lottery_hash_hex"],
+        errors="ignore",
+    ).copy()
+    if HASH_PCT not in out.columns:
+        out[HASH_PCT] = np.nan
 
     for idx, wish in out.iterrows():
         label = str(wish.get(PROGRAM, "")).strip()
         if not label or label not in mapping:
             continue
-        program    = mapping[label]
+        program = mapping[label]
         population = max(round(as_float(program[POP])), 1)
-        h          = mtb_hash(student_id, program["rbd"])
+        lottery_percentile = mtb_hash(student_id, program["rbd"])
 
-        out.at[idx, HASH_INPUT] = h[HASH_INPUT]
-        out.at[idx, HASH_HEX]   = h[HASH_HEX]
-        out.at[idx, HASH_PCT]   = h[HASH_PCT]
+        out.at[idx, HASH_PCT] = lottery_percentile
         # Theory-consistent equivalent lottery rank within the program-level
         # reference population N_s = program_lottery_population_2024.
-        out.at[idx, LOTTERY]    = pct_to_rank(h[HASH_PCT], population)
+        out.at[idx, LOTTERY] = pct_to_rank(lottery_percentile, population)
 
     return out
 
@@ -125,17 +191,15 @@ def attach_mtb_hashes(
 def resolve_priority_tier(wish: pd.Series, program: pd.Series) -> str:
     """Determine the priority tier for a wish.
 
-    This version reuses the older MTB app rule for priority_student:
-    the student keeps the priority_student tier only if their lottery number
-    is within floor(15% * program capacity). Otherwise, the student falls back
-    to the next active priority tier.
+    A student flagged as priority_student keeps that tier only when their
+    lottery rank falls within the program's actual priority_student_seats
+    allocation. Otherwise, the student falls back to the next active tier.
     """
     if as_bool(wish.get("priority_sibling")):
         return "priority_sibling"
 
     if as_bool(wish.get("priority_student")):
-        capacity = max(round(as_float(program[CAPACITY])), 0)
-        quota_count = int(np.floor(PRIORITY_STUDENT_QUOTA * capacity))
+        quota_count = max(round(as_float(program[PRIORITY_STUDENT_SEATS])), 0)
         lottery = max(round(as_float(wish.get(LOTTERY, 1), 1)), 1)
         if lottery <= quota_count:
             return "priority_student"
@@ -204,9 +268,6 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
         "lottery_percentile_used":          percentile,
         "priority_effective_percentile":    eff_pct,
         "priority_effective_rank":          eff_rank,
-        "lottery_hash_input":               str(wish.get(HASH_INPUT, "")),
-        "lottery_hash_hex":                 str(wish.get(HASH_HEX, "")),
-        "lottery_hash_percentile":          as_float(wish.get(HASH_PCT), np.nan),
         "availability_probability":         float(np.clip(p_avail, 0, 1)),
         "calibration_2024_imputed":         as_bool(program.get(IMPUTED, False)),
         "calibration_2024_imputation_method": str(program.get(IMPUT_METHOD, "")),
@@ -221,8 +282,8 @@ def compute_from_availability_rows(rows: list[dict] | pd.DataFrame) -> pd.DataFr
     """Aggregate already-computed wish availabilities into assignment chances."""
     choices = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     if choices.empty or "availability_probability" not in choices.columns:
-        raise ValueError(
-            t("No valid wish could be matched to the program data. Check the imported wish list.")
+        raise UnknownProgram(
+            "No valid wish could be matched to the program data. Check the imported wish list."
         )
     choices["cumulative_unavailable_before_choice"] = (
         (1 - choices["availability_probability"]).cumprod().shift(1).fillna(1)
@@ -242,7 +303,7 @@ def compute(
 ) -> pd.DataFrame:
     clean = wishes[wishes[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK, kind="stable")
     if clean.empty:
-        raise ValueError(t("Add at least one valid wish."))
+        raise EmptyWishList("Add at least one valid wish.")
 
     rows = []
     for _, wish in clean.iterrows():
@@ -275,8 +336,8 @@ def precompute_equivalence_availability(
             lookup[wish_availability_cache_key(wish)] = availability(wish, mapping[label])
 
     if not lookup:
-        raise ValueError(
-            t("No valid wish could be matched to the program data. Check the imported wish list.")
+        raise UnknownProgram(
+            "No valid wish could be matched to the program data. Check the imported wish list."
         )
     return lookup
 
@@ -288,16 +349,14 @@ def compute_equivalence_order_from_precomputed(
     """Recompute only cumulative assignment probabilities for one permutation."""
     clean = strict_order[strict_order[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK, kind="stable")
     if clean.empty:
-        raise ValueError(t("Add at least one valid wish."))
+        raise EmptyWishList("Add at least one valid wish.")
 
     rows = []
     for _, wish in clean.iterrows():
         key = wish_availability_cache_key(wish)
         if key not in availability_lookup:
-            raise ValueError(
-                t(
-                    "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the imported wish list."
-                )
+            raise UnknownProgram(
+                "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the imported wish list."
             )
         cached = availability_lookup[key].copy()
         cached["wish_rank"] = int(wish[WISH_RANK])

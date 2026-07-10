@@ -50,6 +50,109 @@ def format_choices_table(choices):
     })
 
 
+def _split_tied_group_orders(value) -> list[list[str]]:
+    """Parse the stored tied-group order into independently renderable groups."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [
+        [program.strip() for program in block.split(" → ") if program.strip()]
+        for block in text.split(" | ")
+        if block.strip()
+    ]
+
+
+def _render_tied_order(value) -> None:
+    """Render one or more tied groups as short numbered rankings."""
+    groups = _split_tied_group_orders(value)
+    if not groups:
+        st.write(t("No tied-program order was recorded for this option."))
+        return
+
+    for group_index, programs in enumerate(groups, start=1):
+        if len(groups) > 1:
+            st.markdown(t("**Tied group {group}:**", group=group_index))
+        for rank, program in enumerate(programs, start=1):
+            st.write(f"{rank}. {display_outcome_label(program)}")
+
+
+def _family_order_view(variants_df) -> None:
+    """Show families which tied-program order leads to which predicted result."""
+    order_column = (
+        "Order inside tied programs"
+        if "Order inside tied programs" in variants_df.columns
+        else "Strict order"
+    )
+    rows = variants_df.sort_values("Strict order #", kind="stable").reset_index(drop=True)
+
+    st.markdown(t("#### What each order inside the tied programs leads to"))
+    st.caption(
+        t(
+            "Only programs tied within the same preference group are shown below. "
+            "Programs whose position never changes are omitted."
+        )
+    )
+
+    if len(rows) <= 12:
+        for option_number, (_, row) in enumerate(rows.iterrows(), start=1):
+            with st.container(border=True):
+                st.markdown(t("### Option {number}", number=option_number))
+                st.markdown(t("**Place the tied programs in this order:**"))
+                _render_tied_order(row.get(order_column, ""))
+
+                outcome = display_outcome_label(row.get("Predicted outcome", ""))
+                chance = float(row.get("Predicted outcome final chance", 0.0))
+                st.success(t("Most likely outcome: **{outcome}**", outcome=outcome))
+                st.caption(
+                    t(
+                        "Estimated final chance for this outcome: {chance:.1%}",
+                        chance=chance,
+                    )
+                )
+    else:
+        st.caption(
+            t(
+                "Because there are {n:,} compatible orders, they are grouped below "
+                "by their most likely outcome.",
+                n=len(rows),
+            )
+        )
+        grouped = rows.groupby("Predicted outcome", sort=False, dropna=False)
+        for outcome, outcome_rows in grouped:
+            display_outcome = display_outcome_label(outcome)
+            with st.expander(
+                t(
+                    "{outcome} — {n:,} compatible order(s)",
+                    outcome=display_outcome,
+                    n=len(outcome_rows),
+                ),
+                expanded=False,
+            ):
+                family_table = outcome_rows[[order_column, "Predicted outcome final chance"]].copy()
+                family_table["Predicted outcome final chance"] = family_table[
+                    "Predicted outcome final chance"
+                ].map(lambda value: f"{float(value):.1%}")
+                family_table = family_table.rename(
+                    columns={
+                        order_column: "Order inside tied programs",
+                        "Predicted outcome final chance": "Final chance for predicted outcome",
+                    }
+                )
+                st.dataframe(
+                    format_display_table(family_table),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    st.info(
+        t(
+            "Inside each tied group, place first the program the family genuinely "
+            "prefers. The overall unmatched risk does not change, but the most "
+            "likely school can change."
+        )
+    )
+
+
 def render_single_summary(
     choices,
     hard_threshold: float,
@@ -234,36 +337,25 @@ def render_simulation_result(result: dict) -> None:
                 t("Changing the internal order can lead to different predicted schools. The overall unmatched risk remains unchanged; only the distribution of assignment probabilities across schools changes.")
             )
 
-        st.caption(
-            t("How to read this table: the overall unmatched risk is unchanged across compatible strict orders because the same programs are being tested. What can change is the most likely school assignment and its final chance.")
-        )
+        if len(distinct_outcomes) > 1 or same_outcome_but_probability_changes:
+            _family_order_view(variants_df)
 
-        outcome_summary = (
-            variants_df
-            .groupby("Predicted outcome", as_index=False)
-            .agg(
-                strict_orders=("Strict order #", "count"),
-                typical_final_chance=("Predicted outcome final chance", "mean"),
-            )
-            .sort_values(["strict_orders", "Predicted outcome"], ascending=[False, True])
-        )
-        outcome_summary["Share of strict orders"] = outcome_summary["strict_orders"] / len(variants_df)
-        outcome_summary["Typical final chance"] = outcome_summary["typical_final_chance"].map(lambda x: f"{x:.1%}")
-        outcome_summary["Share of strict orders"] = outcome_summary["Share of strict orders"].map(lambda x: f"{x:.1%}")
-        outcome_summary = outcome_summary.rename(columns={"strict_orders": "Strict orders"})
-        outcome_summary = outcome_summary[
-            ["Predicted outcome", "Strict orders", "Share of strict orders", "Typical final chance"]
-        ]
-        st.dataframe(format_display_table(outcome_summary), width="stretch", hide_index=True)
-
-        with st.expander(t("All strict orders tested"), expanded=False):
+        with st.expander(t("Technical details of all tested orders"), expanded=False):
             st.caption(
-                t("Each line is one strict ranking compatible with the student's preference groups. Flagged at risk is checked only when the unmatched risk reaches the hard threshold.")
+                t(
+                    "This technical table contains the complete strict ranking for every "
+                    "tested permutation. It is not needed to choose the order inside tied groups."
+                )
             )
             variants_display = variants_df.copy()
             if "Predicted outcome final chance" in variants_display.columns:
-                variants_display["Predicted outcome final chance"] = variants_display["Predicted outcome final chance"].map(lambda x: f"{x:.1%}")
-            variants_display = variants_display.drop(columns=["Unmatched risk"], errors="ignore")
+                variants_display["Predicted outcome final chance"] = variants_display[
+                    "Predicted outcome final chance"
+                ].map(lambda x: f"{x:.1%}")
+            variants_display = variants_display.drop(
+                columns=["Unmatched risk", "Order inside tied programs"],
+                errors="ignore",
+            )
             st.dataframe(format_display_table(variants_display), width="stretch", hide_index=True)
         return
 

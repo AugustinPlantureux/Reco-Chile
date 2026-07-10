@@ -22,8 +22,8 @@ def format_display_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     distance_cols = [
-        "Distance from home (km)",
-        "Distance from current list (km)",
+        "Straight-line distance from home (km)",
+        "Straight-line distance from current list (km)",
     ]
     one_decimal_cols = [
         "Recommendation score",

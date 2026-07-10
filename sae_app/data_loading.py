@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from sae_app.constants import (
+    CHILE_COORDINATE_ZONES,
     PROGRAM_DISPLAY_NAME,
     PROGRAM_ENROLLMENT_FEE,
     PROGRAM_FILTERS_PATH,
@@ -26,8 +27,6 @@ from sae_app.constants import (
     PROGRAM_NAMES_PATH,
     PROGRAM_PACE,
     PROGRAM_PIE,
-    PROGRAM_RECONSTRUCTED_NAME,
-    PROGRAM_RELIGIOUS_DETAIL,
     PROGRAM_RELIGIOUS_ORIENTATION,
     PROGRAM_RURALITY,
     PROGRAM_SCHOOL_DAY,
@@ -47,9 +46,15 @@ from sae_app.constants import (
     UNKNOWN_SCHOOL_NAME,
     CAPACITY,
     POP,
+    PRIORITY_STUDENT_SEATS,
     TRUE_APP,
 )
 from sae_app.text_utils import clean_optional_value, clean_text, norm_code, parse_coordinate
+
+
+class DataSchemaError(ValueError):
+    """Raised when an input CSV is readable but structurally unsafe to use."""
+
 
 # ---------------------------------------------------------------------------
 # CSV reading utilities
@@ -80,6 +85,54 @@ def first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None
     return None
 
 
+def _drop_exact_duplicates_or_raise_conflicts(
+    df: pd.DataFrame,
+    key_columns: list[str],
+    *,
+    source_name: str,
+) -> pd.DataFrame:
+    """Drop exact duplicate keys, but reject keys with conflicting content.
+
+    The previous loaders called drop_duplicates() directly, which could hide a
+    future source-data conflict by keeping whichever row happened to appear
+    first. Whitespace-only differences are ignored; any meaningful difference
+    in the retained columns is reported before deduplication.
+    """
+    duplicate_mask = df.duplicated(key_columns, keep=False)
+    if not duplicate_mask.any():
+        return df
+
+    duplicate_rows = df.loc[duplicate_mask].copy()
+    value_columns = [col for col in df.columns if col not in key_columns]
+    conflicting_keys: list[tuple] = []
+
+    groupby_keys = key_columns[0] if len(key_columns) == 1 else key_columns
+    for key, group in duplicate_rows.groupby(groupby_keys, dropna=False, sort=False):
+        comparable = group[value_columns].copy()
+        for col in value_columns:
+            comparable[col] = comparable[col].map(
+                lambda value: ""
+                if pd.isna(value)
+                else " ".join(str(value).strip().split())
+            )
+        if len(comparable.drop_duplicates()) > 1:
+            if not isinstance(key, tuple):
+                key = (key,)
+            conflicting_keys.append(key)
+
+    if conflicting_keys:
+        examples = ", ".join(
+            "/".join(str(part) for part in key)
+            for key in conflicting_keys[:5]
+        )
+        raise DataSchemaError(
+            f"{source_name} contains conflicting duplicate rows for key(s) "
+            f"{', '.join(key_columns)}: {examples}"
+        )
+
+    return df.drop_duplicates(key_columns, keep="first").copy()
+
+
 # ---------------------------------------------------------------------------
 # Region lookup
 # ---------------------------------------------------------------------------
@@ -91,23 +144,35 @@ def region_sort_index(region: str) -> int:
         return len(REGION_ORDER)
 
 
+def load_rbd_region_map(file_bytes: bytes | None = None) -> pd.DataFrame:
+    """Load the RBD-region map, caching by the actual file contents."""
+    if file_bytes is None:
+        file_bytes = RBD_REGION_PATH.read_bytes()
+    return _load_rbd_region_map(file_bytes)
+
+
 @st.cache_data(show_spinner=False)
-def load_rbd_region_map() -> pd.DataFrame:
-    df = read_csv_path(RBD_REGION_PATH, sep=",")
+def _load_rbd_region_map(file_bytes: bytes) -> pd.DataFrame:
+    df = read_csv(file_bytes, sep=",")
 
     required = {"rbd", REGION}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"{RBD_REGION_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
+        raise DataSchemaError(f"{RBD_REGION_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
     out = df[["rbd", REGION]].copy()
     out["rbd"] = norm_code(out["rbd"])
     out[REGION] = out[REGION].astype(str).str.strip()
-    out = out.drop_duplicates("rbd")
+    out = _drop_exact_duplicates_or_raise_conflicts(
+        out, ["rbd"], source_name=RBD_REGION_PATH.name
+    )
     return out
 
 
-def attach_regions(calib: pd.DataFrame) -> pd.DataFrame:
+def attach_regions(
+    calib: pd.DataFrame,
+    region_file_bytes: bytes | None = None,
+) -> pd.DataFrame:
     """Attach region labels loaded from data/rbd_region_map.csv.
 
     This keeps every program from the capacities file. If an RBD is not found in
@@ -116,7 +181,7 @@ def attach_regions(calib: pd.DataFrame) -> pd.DataFrame:
     out = calib.copy()
     out["rbd"] = norm_code(out["rbd"])
 
-    regions = load_rbd_region_map()
+    regions = load_rbd_region_map(region_file_bytes)
     out = out.merge(regions, on="rbd", how="left")
     out[REGION] = out[REGION].fillna(UNKNOWN_REGION)
     return out
@@ -140,9 +205,16 @@ def available_regions(calib: pd.DataFrame) -> list[str]:
 # Program-characteristic filters (data/program_filters.csv)
 # ---------------------------------------------------------------------------
 
+def load_program_filters(file_bytes: bytes | None = None) -> pd.DataFrame:
+    """Load program filters, caching by the actual file contents."""
+    if file_bytes is None:
+        file_bytes = PROGRAM_FILTERS_PATH.read_bytes()
+    return _load_program_filters(file_bytes)
+
+
 @st.cache_data(show_spinner=False)
-def load_program_filters() -> pd.DataFrame:
-    df = read_csv_path(PROGRAM_FILTERS_PATH, sep=",")
+def _load_program_filters(file_bytes: bytes) -> pd.DataFrame:
+    df = read_csv(file_bytes, sep=",")
 
     required = {
         "rbd",
@@ -155,16 +227,21 @@ def load_program_filters() -> pd.DataFrame:
     }
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"{PROGRAM_FILTERS_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
+        raise DataSchemaError(f"{PROGRAM_FILTERS_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
     out = df[list(required)].copy()
     out["rbd"] = norm_code(out["rbd"])
     out["program_code"] = norm_code(out["program_code"])
-    out = out.drop_duplicates(["rbd", "program_code"])
+    out = _drop_exact_duplicates_or_raise_conflicts(
+        out, ["rbd", "program_code"], source_name=PROGRAM_FILTERS_PATH.name
+    )
     return out
 
 
-def attach_program_filters(calib: pd.DataFrame) -> pd.DataFrame:
+def attach_program_filters(
+    calib: pd.DataFrame,
+    filter_file_bytes: bytes | None = None,
+) -> pd.DataFrame:
     """Attach program characteristics used by the sidebar filters.
 
     The capacities/calibration file remains the source of the available programs.
@@ -175,7 +252,7 @@ def attach_program_filters(calib: pd.DataFrame) -> pd.DataFrame:
     out["rbd"] = norm_code(out["rbd"])
     out["program_code"] = norm_code(out["program_code"])
 
-    filters = load_program_filters()
+    filters = load_program_filters(filter_file_bytes)
     out = out.merge(filters, on=["rbd", "program_code"], how="left")
 
     for col in [
@@ -396,6 +473,73 @@ def translate_filter_value(value, target_column: str, *, default: str = "No info
     return VALUE_TRANSLATIONS.get(target_column, {}).get(text, text)
 
 
+PROGRAM_COORDINATE_SOURCE = "program_coordinate_source"
+
+# Coordinate columns are evaluated as coherent pairs. The order is also the
+# row-level fallback order: a later pair is used only when no earlier pair has
+# two valid Chilean coordinates for that row.
+PROGRAM_COORDINATE_COLUMN_PAIRS = [
+    (PROGRAM_LATITUDE, PROGRAM_LONGITUDE, "program coordinate"),
+    ("school_latitude", "school_longitude", "program coordinate"),
+    ("lat_lycee", "lon_lycee", "program coordinate"),
+    ("establecimiento_latitude", "establecimiento_longitude", "program coordinate"),
+    ("latitude", "longitude", "program coordinate"),
+    ("lat", "lon", "program coordinate"),
+    ("lat", "lng", "program coordinate"),
+    ("latitud", "longitud", "program coordinate"),
+    ("commune_latitude", "commune_longitude", "commune coordinate"),
+]
+
+
+def _coordinates_inside_chile_zones(
+    latitudes: pd.Series,
+    longitudes: pd.Series,
+) -> pd.Series:
+    """Vectorized mainland/insular Chile validation for coordinate ingestion."""
+    valid = pd.Series(False, index=latitudes.index, dtype=bool)
+    for _, min_lat, max_lat, min_lon, max_lon in CHILE_COORDINATE_ZONES:
+        valid |= (
+            latitudes.between(min_lat, max_lat, inclusive="both")
+            & longitudes.between(min_lon, max_lon, inclusive="both")
+        )
+    return valid & latitudes.notna() & longitudes.notna()
+
+
+def _coalesce_program_coordinates(
+    df: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series, pd.Series, list[str]]:
+    """Select the first complete valid coordinate pair for each row.
+
+    Latitude and longitude are never selected independently, which prevents
+    hybrid coordinates such as a school latitude combined with a commune
+    longitude. Rapa Nui and Juan Fernández are accepted through the same shared
+    Chile-zone definition used by geo.valid_lat_lon().
+    """
+    latitudes = pd.Series(np.nan, index=df.index, dtype=float)
+    longitudes = pd.Series(np.nan, index=df.index, dtype=float)
+    sources = pd.Series("", index=df.index, dtype=object)
+    source_columns: list[str] = []
+
+    for lat_col, lon_col, source in PROGRAM_COORDINATE_COLUMN_PAIRS:
+        if lat_col not in df.columns or lon_col not in df.columns:
+            continue
+
+        for col in (lat_col, lon_col):
+            if col not in source_columns:
+                source_columns.append(col)
+
+        pair_latitudes = df[lat_col].map(parse_coordinate)
+        pair_longitudes = df[lon_col].map(parse_coordinate)
+        valid_pair = _coordinates_inside_chile_zones(pair_latitudes, pair_longitudes)
+        use_pair = latitudes.isna() & longitudes.isna() & valid_pair
+
+        latitudes.loc[use_pair] = pair_latitudes.loc[use_pair]
+        longitudes.loc[use_pair] = pair_longitudes.loc[use_pair]
+        sources.loc[use_pair] = source
+
+    return latitudes, longitudes, sources, source_columns
+
+
 @st.cache_data(show_spinner=False)
 def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     df = read_csv(file_bytes, sep="auto")
@@ -404,7 +548,7 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     required = {"rbd", "program_code", "nom_programme_reconstruit", "nom_lycee"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"{PROGRAM_NAMES_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
+        raise DataSchemaError(f"{PROGRAM_NAMES_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
     optional_source_cols = [
         "commune",
@@ -414,35 +558,27 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
         "paiement_matricula",
         "paiement_mensualite",
         "orientation_religieuse",
-        "orientation_religieuse_autre_detail",
     ]
-    lat_source_col = first_existing_column(df, [
-        "program_latitude", "school_latitude", "lat_lycee",
-        "latitude", "lat", "latitud", "commune_latitude",
-        "establecimiento_latitude",
-    ])
-    lon_source_col = first_existing_column(df, [
-        "program_longitude", "school_longitude", "lon_lycee",
-        "longitude", "lon", "lng", "longitud", "commune_longitude",
-        "establecimiento_longitude",
-    ])
+    coordinate_latitudes, coordinate_longitudes, coordinate_sources, coordinate_source_cols = (
+        _coalesce_program_coordinates(df)
+    )
 
     keep_cols = ["rbd", "program_code", "nom_programme_reconstruit", "nom_lycee"]
     keep_cols += [c for c in optional_source_cols if c in df.columns]
-    keep_cols += [c for c in [lat_source_col, lon_source_col] if c and c not in keep_cols]
+    keep_cols += [c for c in coordinate_source_cols if c not in keep_cols]
 
     out = df[keep_cols].copy()
     out["rbd"] = norm_code(out["rbd"])
     out["program_code"] = norm_code(out["program_code"])
-    out[PROGRAM_RECONSTRUCTED_NAME] = out["nom_programme_reconstruit"].astype(str).str.strip()
-    out[PROGRAM_DISPLAY_NAME] = out[PROGRAM_RECONSTRUCTED_NAME].map(compact_program_name)
+    out[PROGRAM_DISPLAY_NAME] = out["nom_programme_reconstruit"].map(compact_program_name)
     out[SCHOOL_NAME] = out["nom_lycee"].map(compact_school_name)
     out[SCHOOL_COMMUNE] = (
         out["commune"].astype(str).str.strip().str.title()
         if "commune" in out.columns else ""
     )
-    out[PROGRAM_LATITUDE] = out[lat_source_col].map(parse_coordinate) if lat_source_col else np.nan
-    out[PROGRAM_LONGITUDE] = out[lon_source_col].map(parse_coordinate) if lon_source_col else np.nan
+    out[PROGRAM_LATITUDE] = coordinate_latitudes
+    out[PROGRAM_LONGITUDE] = coordinate_longitudes
+    out[PROGRAM_COORDINATE_SOURCE] = coordinate_sources
 
     criteria_sources = {
         PROGRAM_RURALITY: "ruralite",
@@ -458,11 +594,6 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
         else:
             out[target_col] = "No information"
 
-    if "orientation_religieuse_autre_detail" in out.columns:
-        out[PROGRAM_RELIGIOUS_DETAIL] = out["orientation_religieuse_autre_detail"].map(lambda x: clean_optional_value(x, default=""))
-    else:
-        out[PROGRAM_RELIGIOUS_DETAIL] = ""
-
     source_cols_to_drop = [
         "nom_programme_reconstruit",
         "nom_lycee",
@@ -473,26 +604,30 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
         "paiement_matricula",
         "paiement_mensualite",
         "orientation_religieuse",
-        "orientation_religieuse_autre_detail",
     ]
     source_cols_to_drop += [
-        c for c in [lat_source_col, lon_source_col]
-        if c and c not in {PROGRAM_LATITUDE, PROGRAM_LONGITUDE}
+        c for c in coordinate_source_cols if c not in {PROGRAM_LATITUDE, PROGRAM_LONGITUDE}
     ]
     out = out.drop(columns=[c for c in source_cols_to_drop if c in out.columns])
-    out = out.drop_duplicates(["rbd", "program_code"])
+    out = _drop_exact_duplicates_or_raise_conflicts(
+        out, ["rbd", "program_code"], source_name=PROGRAM_NAMES_PATH.name
+    )
     return out
 
 
-def attach_program_names(calib: pd.DataFrame) -> pd.DataFrame:
-    """Attach reconstructed program names, real school names, and additional choice criteria."""
+def attach_program_names(
+    calib: pd.DataFrame,
+    program_names_file_bytes: bytes | None = None,
+) -> pd.DataFrame:
+    """Attach display names, school names, and additional choice criteria."""
     out = calib.copy()
     out["rbd"] = norm_code(out["rbd"])
     out["program_code"] = norm_code(out["program_code"])
 
-    names = load_program_names(PROGRAM_NAMES_PATH.read_bytes())
+    if program_names_file_bytes is None:
+        program_names_file_bytes = PROGRAM_NAMES_PATH.read_bytes()
+    names = load_program_names(program_names_file_bytes)
     out = out.merge(names, on=["rbd", "program_code"], how="left")
-    out[PROGRAM_RECONSTRUCTED_NAME] = out[PROGRAM_RECONSTRUCTED_NAME].fillna("")
     out[PROGRAM_DISPLAY_NAME] = out[PROGRAM_DISPLAY_NAME].fillna(UNKNOWN_PROGRAM_NAME)
     out[SCHOOL_NAME] = out[SCHOOL_NAME].fillna("")
     out[SCHOOL_COMMUNE] = out[SCHOOL_COMMUNE].fillna("")
@@ -500,6 +635,10 @@ def attach_program_names(calib: pd.DataFrame) -> pd.DataFrame:
         out[PROGRAM_LATITUDE] = np.nan
     if PROGRAM_LONGITUDE not in out.columns:
         out[PROGRAM_LONGITUDE] = np.nan
+    if PROGRAM_COORDINATE_SOURCE not in out.columns:
+        out[PROGRAM_COORDINATE_SOURCE] = ""
+    else:
+        out[PROGRAM_COORDINATE_SOURCE] = out[PROGRAM_COORDINATE_SOURCE].fillna("")
 
     for col in [
         PROGRAM_RURALITY,
@@ -510,7 +649,6 @@ def attach_program_names(calib: pd.DataFrame) -> pd.DataFrame:
         PROGRAM_RELIGIOUS_ORIENTATION,
     ]:
         out[col] = out[col].fillna("No information")
-    out[PROGRAM_RELIGIOUS_DETAIL] = out[PROGRAM_RELIGIOUS_DETAIL].fillna("")
     return out
 
 
@@ -519,21 +657,52 @@ def attach_program_names(calib: pd.DataFrame) -> pd.DataFrame:
 # (data/capacities_2025_wta_with_2024_calibration.csv)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
 def load_calibration(file_bytes: bytes) -> pd.DataFrame:
+    """Load all calibration inputs, caching by every file's actual contents."""
+    return _load_calibration(
+        file_bytes,
+        RBD_REGION_PATH.read_bytes(),
+        PROGRAM_FILTERS_PATH.read_bytes(),
+        PROGRAM_NAMES_PATH.read_bytes(),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _load_calibration(
+    file_bytes: bytes,
+    region_file_bytes: bytes,
+    filter_file_bytes: bytes,
+    program_names_file_bytes: bytes,
+) -> pd.DataFrame:
+    """Parse and merge calibration inputs after minimum-schema validation."""
     df = read_csv(file_bytes, sep=";")
     if len(df.columns) == 1:
         df = read_csv(file_bytes, sep=",")
+
+    base_required = {"rbd", "program_code"}
+    missing = base_required - set(df.columns)
+    if missing:
+        raise DataSchemaError(
+            "Calibration CSV is missing required column(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    # Normalize only after the minimum schema is known to be present. This
+    # avoids a raw KeyError for malformed future CSV updates.
     df["program_code"] = norm_code(df["program_code"])
     df["rbd"] = norm_code(df["rbd"])
-    df = attach_regions(df)
-    df = attach_program_filters(df)
-    df = attach_program_names(df)
+    df = _drop_exact_duplicates_or_raise_conflicts(
+        df, ["rbd", "program_code"], source_name="Calibration CSV"
+    )
+
+    df = attach_regions(df, region_file_bytes)
+    df = attach_program_filters(df, filter_file_bytes)
+    df = attach_program_names(df, program_names_file_bytes)
     return df
 
 
 def required_cols() -> list[str]:
-    cols = ["rbd", "program_code", CAPACITY, TRUE_APP, POP]
+    cols = ["rbd", "program_code", CAPACITY, PRIORITY_STUDENT_SEATS, TRUE_APP, POP]
     for tier in TIERS:
         cols += [
             f"priority_share_{tier}_2024",
@@ -548,14 +717,14 @@ def validate_cumulative_share_columns(
     *,
     tolerance: float = 1e-6,
 ) -> list[str]:
-    """Check before + share == through for every priority tier.
+    """Validate the full priority-share distribution for every program.
 
-    The calculation itself uses cum_share_before_* and priority_share_*.
-    cum_share_through_* is kept as a calibration integrity check so a malformed
-    calibration file is caught before the app silently computes with
-    inconsistent cumulative shares.
+    Checks include missing/non-numeric values, [0, 1] bounds,
+    before + share == through, continuity between adjacent tiers, a zero start,
+    and a final cumulative share of one.
     """
     errors: list[str] = []
+    numeric_by_tier: dict[str, tuple[pd.Series, pd.Series, pd.Series]] = {}
 
     for tier in TIERS:
         share_col = f"priority_share_{tier}_2024"
@@ -569,7 +738,7 @@ def validate_cumulative_share_columns(
         share = pd.to_numeric(calib[share_col], errors="coerce")
         before = pd.to_numeric(calib[before_col], errors="coerce")
         through = pd.to_numeric(calib[through_col], errors="coerce")
-        expected_through = before + share
+        numeric_by_tier[tier] = (share, before, through)
 
         missing_or_invalid = share.isna() | before.isna() | through.isna()
         if missing_or_invalid.any():
@@ -580,41 +749,165 @@ def validate_cumulative_share_columns(
             )
 
         valid = ~missing_or_invalid
+        out_of_range = valid & (
+            (share < -tolerance)
+            | (share > 1 + tolerance)
+            | (before < -tolerance)
+            | (before > 1 + tolerance)
+            | (through < -tolerance)
+            | (through > 1 + tolerance)
+        )
+        if out_of_range.any():
+            errors.append(
+                f"{tier}: {int(out_of_range.sum())} row(s) with calibration "
+                "shares or cumulative shares outside [0, 1]."
+            )
+
+        expected_through = before + share
         diff = (expected_through - through).abs()
         inconsistent = valid & (diff > tolerance)
-
         if inconsistent.any():
             errors.append(
                 f"{through_col}: {int(inconsistent.sum())} row(s) where "
-                f"cum_share_before + priority_share differs from cum_share_through "
-                f"(max diff {float(diff[inconsistent].max()):.6g})."
+                "cum_share_before + priority_share differs from "
+                f"cum_share_through (max diff {float(diff[inconsistent].max()):.6g})."
+            )
+
+    if TIERS and TIERS[0] in numeric_by_tier:
+        first_before = numeric_by_tier[TIERS[0]][1]
+        invalid_start = first_before.notna() & (first_before.abs() > tolerance)
+        if invalid_start.any():
+            errors.append(
+                f"{int(invalid_start.sum())} row(s) where the first priority "
+                "tier does not start at cumulative share 0."
+            )
+
+    for previous_tier, current_tier in zip(TIERS, TIERS[1:]):
+        if previous_tier not in numeric_by_tier or current_tier not in numeric_by_tier:
+            continue
+        previous_through = numeric_by_tier[previous_tier][2]
+        current_before = numeric_by_tier[current_tier][1]
+        valid = previous_through.notna() & current_before.notna()
+        gap = (previous_through - current_before).abs()
+        discontinuous = valid & (gap > tolerance)
+        if discontinuous.any():
+            errors.append(
+                f"{previous_tier} -> {current_tier}: "
+                f"{int(discontinuous.sum())} row(s) with a discontinuity between "
+                "the previous cumulative end and the next cumulative start "
+                f"(max gap {float(gap[discontinuous].max()):.6g})."
+            )
+
+    if TIERS and TIERS[-1] in numeric_by_tier:
+        final_through = numeric_by_tier[TIERS[-1]][2]
+        invalid_end = final_through.notna() & ((final_through - 1.0).abs() > tolerance)
+        if invalid_end.any():
+            errors.append(
+                f"{int(invalid_end.sum())} row(s) where the final cumulative "
+                "priority share does not equal 1."
             )
 
     return errors
 
 
-def validate_core_numeric_columns(calib: pd.DataFrame) -> list[str]:
-    """Check core numeric calibration fields before any simulation is run.
+SEAT_COMPONENT_COLUMNS = [
+    "integration_student_seats",
+    PRIORITY_STUDENT_SEATS,
+    "high_selectivity_seats_transitional",
+    "high_selectivity_seats_ranking",
+    "regular_seats",
+]
+TOTAL_CAPACITY_COLUMN = "total_capacity"
 
-    Missing capacity or true-applicant values would otherwise be converted to
-    0.0 by as_float() inside the calculation engine. That fallback is useful
-    for defensive parsing, but malformed calibration data should be reported at
-    startup instead of silently producing optimistic or pessimistic estimates.
+
+def validate_core_numeric_columns(
+    calib: pd.DataFrame,
+    *,
+    tolerance: float = 1e-6,
+) -> list[str]:
+    """Validate core counts and cross-column calibration relationships.
+
+    Counts used by the model must be finite non-negative integers, lottery
+    population must be positive, true applicants cannot exceed that population,
+    and the admission-seat components must reconcile to the admission-seat total.
     """
-    checks = [
-        (CAPACITY, "missing, non-numeric, or negative"),
-        (TRUE_APP, "missing, non-numeric, or negative"),
-    ]
     errors: list[str] = []
+    numeric: dict[str, pd.Series] = {}
 
-    for col, description in checks:
+    integer_columns = [
+        CAPACITY,
+        TRUE_APP,
+        POP,
+        TOTAL_CAPACITY_COLUMN,
+        *SEAT_COMPONENT_COLUMNS,
+    ]
+    for col in integer_columns:
         if col not in calib.columns:
-            # Missing columns are reported by required_cols() in app.py.
             continue
 
         values = pd.to_numeric(calib[col], errors="coerce")
-        invalid = values.isna() | (values < 0)
-        if invalid.any():
-            errors.append(f"{col}: {int(invalid.sum())} row(s) with {description} values.")
+        numeric[col] = values
+        invalid_number = values.isna()
+        if invalid_number.any():
+            errors.append(
+                f"{col}: {int(invalid_number.sum())} row(s) with missing or "
+                "non-numeric values."
+            )
+
+        valid = ~invalid_number
+        minimum_invalid = valid & (values <= 0) if col == POP else valid & (values < 0)
+        if minimum_invalid.any():
+            requirement = "positive" if col == POP else "non-negative"
+            errors.append(
+                f"{col}: {int(minimum_invalid.sum())} row(s) that are not {requirement}."
+            )
+
+        non_integer = valid & ((values - values.round()).abs() > tolerance)
+        if non_integer.any():
+            errors.append(
+                f"{col}: {int(non_integer.sum())} row(s) with non-integer count values."
+            )
+
+    if TRUE_APP in numeric and POP in numeric:
+        valid = numeric[TRUE_APP].notna() & numeric[POP].notna()
+        impossible = valid & (numeric[TRUE_APP] > numeric[POP] + tolerance)
+        if impossible.any():
+            errors.append(
+                f"{TRUE_APP}: {int(impossible.sum())} row(s) where true applicants "
+                f"exceed {POP}."
+            )
+
+    if CAPACITY in numeric and PRIORITY_STUDENT_SEATS in numeric:
+        valid = numeric[CAPACITY].notna() & numeric[PRIORITY_STUDENT_SEATS].notna()
+        exceeds_capacity = valid & (
+            numeric[PRIORITY_STUDENT_SEATS] > numeric[CAPACITY] + tolerance
+        )
+        if exceeds_capacity.any():
+            errors.append(
+                f"{PRIORITY_STUDENT_SEATS}: {int(exceeds_capacity.sum())} row(s) "
+                f"exceed {CAPACITY}."
+            )
+
+    if CAPACITY in numeric and TOTAL_CAPACITY_COLUMN in numeric:
+        valid = numeric[CAPACITY].notna() & numeric[TOTAL_CAPACITY_COLUMN].notna()
+        impossible = valid & (numeric[CAPACITY] > numeric[TOTAL_CAPACITY_COLUMN] + tolerance)
+        if impossible.any():
+            errors.append(
+                f"{CAPACITY}: {int(impossible.sum())} row(s) where admission seats "
+                f"exceed {TOTAL_CAPACITY_COLUMN}."
+            )
+
+    if CAPACITY in numeric and all(col in numeric for col in SEAT_COMPONENT_COLUMNS):
+        components = sum((numeric[col] for col in SEAT_COMPONENT_COLUMNS), start=pd.Series(0.0, index=calib.index))
+        valid = numeric[CAPACITY].notna()
+        for col in SEAT_COMPONENT_COLUMNS:
+            valid &= numeric[col].notna()
+        mismatch = valid & ((components - numeric[CAPACITY]).abs() > tolerance)
+        if mismatch.any():
+            errors.append(
+                f"{CAPACITY}: {int(mismatch.sum())} row(s) where seat components "
+                "do not sum to total admission seats "
+                f"(max diff {float((components[mismatch] - numeric[CAPACITY][mismatch]).abs().max()):.6g})."
+            )
 
     return errors

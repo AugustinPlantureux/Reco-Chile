@@ -8,6 +8,7 @@ focused modules:
 - text_utils:          small, dependency-free text/number cleaning helpers
 - data_loading:        reading and validating the CSV data files
 - program_options:     ProgramRecord + building/filtering the program dropdown
+- errors:              typed calculation errors translated only by the UI layer
 - mtb_engine:          the SHA-256 lottery hash + hypergeometric availability model
                        (pure calculation, no Streamlit dependency)
 - wish_list:           wish-list parsing, cleaning, and equivalence-class handling

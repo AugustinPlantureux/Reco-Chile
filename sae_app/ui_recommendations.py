@@ -11,8 +11,19 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from sae_app.constants import EQUIV_GROUP, PROGRAM, WISH_RANK
-from sae_app.geo import geocode_chilean_address, geocoding_precision_warning_key, valid_lat_lon
+from sae_app.constants import (
+    EQUIV_GROUP,
+    HARD_UNMATCHED_THRESHOLD,
+    PROGRAM,
+    SOFT_UNMATCHED_THRESHOLD,
+    WISH_RANK,
+)
+from sae_app.geo import (
+    geocode_chilean_address,
+    geocoding_precision_warning_key,
+    home_geocoding_supports_hard_filter,
+    valid_lat_lon,
+)
 from sae_app.i18n import t
 from sae_app.recommendations import (
     RECOMMENDATION_COMPETITION_WEIGHT,
@@ -63,7 +74,6 @@ def render_similar_program_recommendations(
     use_equivalence_classes: bool = False,
     simulation_done_key: str | None = None,
     simulation_result_key: str | None = None,
-    simulation_student_id_key: str | None = None,
 ) -> None:
     """Render the recommendation UI and optionally append selected programs to the wish list."""
     st.subheader(t("4. Recommended similar programs"))
@@ -85,14 +95,16 @@ def render_similar_program_recommendations(
             t("Recommendations combine revealed preferences, proximity, portfolio-risk improvement, and a diversity step to avoid near-duplicates.")
         )
         st.caption(
-            t("Proximity uses program/commune coordinates when available; otherwise it falls back to approximate regional centroids. To improve it, add data/commune_coordinates.csv with commune, region, latitude, longitude.")
+            t("Proximity uses program/commune coordinates when available. Regional centroids are only a soft fallback and are never used for hard distance exclusion. To improve precision, add data/commune_coordinates.csv with commune, region, latitude, longitude.")
         )
 
         st.markdown(t("#### Portfolio-risk optimization"))
         if np.isfinite(current_unmatched_risk):
             st.metric(t("Current unmatched risk"), f"{current_unmatched_risk:.1%}")
         st.caption(
-            t("Each recommended program is evaluated as if it were appended after the current wish list. The table estimates the student's chance of getting that added program; for a marginal append, this is also the reduction in unmatched risk.")
+            t(
+                'Each recommended program is evaluated as if it were appended after the current wish list. "Chance if considered" is conditional on the student reaching that wish. The marginal unmatched-risk reduction is the current unmatched risk multiplied by that conditional chance; it is also the estimated final assignment chance for a program appended at the end. Projected unmatched risk is the current risk minus that reduction.'
+            )
         )
         st.caption(
             t("Recommended programs assume no special priority flags for the newly added school. If the student has a sibling, priority-student quota, civil-servant, former-student, or already-enrolled priority for that school, add the program to the list and mark the priority before rerunning the simulation.")
@@ -170,13 +182,24 @@ def render_similar_program_recommendations(
         elif normalized_current_address and stored_geo:
             st.info(t("Address changed. Click the button to update the coordinates."))
 
+        hard_home_distance_filter_available = bool(
+            home_geo_reference
+            and home_geocoding_supports_hard_filter(home_geo_reference)
+        )
         if home_geo_reference:
-            st.caption(
-                t(
-                    "With a home address, recommendations are limited to programs within {max_distance:.0f} km of the geocoded location.",
-                    max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
+            if hard_home_distance_filter_available:
+                st.caption(
+                    t(
+                        "The {max_distance:.0f} km straight-line limit is applied only when the program has reliable school/commune coordinates. Regional approximations are never used for hard exclusion.",
+                        max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
+                    )
                 )
-            )
+            else:
+                st.caption(
+                    t(
+                        "Because the home location is only city-level or approximate, no hard distance cutoff is applied. Straight-line distance only affects the recommendation score."
+                    )
+                )
 
         rec_max = st.slider(
             t("Number of recommendations"),
@@ -221,11 +244,10 @@ def render_similar_program_recommendations(
         )
 
         if recommendations.empty:
-            if home_geo_reference:
+            if hard_home_distance_filter_available:
                 st.warning(
                     t(
-                        "No recommended program was found within {max_distance:.0f} km under the current scoring rules. You can still add nearby schools manually, or increase the home-distance limit in sae_app/recommendations.py if the family is willing to travel farther.",
-                        max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
+                        "No recommended program matched the current scoring and reliable straight-line distance rules. You can still add programs manually."
                     )
                 )
             else:
@@ -252,7 +274,11 @@ def render_similar_program_recommendations(
             )
 
         st.markdown(t("#### Suggested programs"))
-        distance_column = "Distance from home (km)" if home_geo_reference else "Distance from current list (km)"
+        distance_column = (
+            "Straight-line distance from home (km)"
+            if home_geo_reference
+            else "Straight-line distance from current list (km)"
+        )
         visible_columns = [
             "School",
             "Commune",
@@ -260,16 +286,25 @@ def render_similar_program_recommendations(
             "Program details",
             distance_column,
             "Chance if considered",
-            "Estimated final chance if appended",
             "Recommendation score",
             "Capacity",
             "Applicants / seat",
             "Estimated MTB rank",
         ]
+        st.caption(
+            t("Distances are straight-line estimates. They do not represent road distance, travel time, or actual accessibility.")
+        )
         st.dataframe(
             format_recommendation_display(recommendations, visible_columns),
             width="stretch",
             hide_index=True,
+        )
+        st.caption(
+            t(
+                "Row colors reflect the projected unmatched risk after appending the program: green below the soft threshold ({soft:.1%}), orange between the soft and hard thresholds, and red at or above the hard threshold ({hard:.1%}).",
+                soft=SOFT_UNMATCHED_THRESHOLD,
+                hard=HARD_UNMATCHED_THRESHOLD,
+            )
         )
         st.caption(
             t("Portfolio-risk estimates are marginal: they assume the program is appended after the current list. Reordering it higher would change final probabilities and should be tested by adding it to the wish list and rerunning the simulation.")
@@ -329,7 +364,6 @@ def render_similar_program_recommendations(
                 invalidate_simulation_state(
                     simulation_done_key=simulation_done_key,
                     simulation_result_key=simulation_result_key,
-                    simulation_student_id_key=simulation_student_id_key,
                 )
                 clear_wish_editor_widget_state(editor_widget_key_base)
                 st.rerun()
