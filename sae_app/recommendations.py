@@ -82,6 +82,10 @@ RECOMMENDATION_DISTANCE_SCALE_KM = 50.0
 RECOMMENDATION_MAX_HOME_DISTANCE_KM = 100.0
 RECOMMENDATION_DIVERSIFY = True
 RECOMMENDATION_DIVERSITY_STRENGTH = 0.35
+# Number of valid wishes after which the revealed-preference profile is treated
+# as fully reliable. Shorter lists still work, but their automatic criterion
+# weights are softened.
+RECOMMENDATION_FULL_RELIABILITY_WISH_COUNT = 4.0
 
 # Color-code recommended schools from their probability of being available if
 # the student reaches that wish, using the student's real MTB hash for that
@@ -220,7 +224,7 @@ def automatic_recommendation_weights(profile: dict) -> dict[str, float]:
     Coverage prevents a sparsely observed criterion from dominating the profile.
     """
     valid_wish_count = max(int(profile.get("valid_wish_count", 0)), 0)
-    reliability = min(valid_wish_count / 4.0, 1.0)
+    reliability = min(valid_wish_count / RECOMMENDATION_FULL_RELIABILITY_WISH_COUNT, 1.0)
 
     weights: dict[str, float] = {}
     for criterion_col, _, base_weight in RECOMMENDATION_CRITERIA:
@@ -592,12 +596,18 @@ def recommend_similar_programs(
 
             capacity = max(program.capacity, 0.0)
             true_applicants = max(program.true_applicants, 0.0)
-            if capacity > 0 and true_applicants > 0:
-                competition_ratio = true_applicants / capacity
-                accessibility_score = min(capacity / true_applicants, 1.0)
-            else:
+            if capacity <= 0:
                 competition_ratio = np.nan
                 accessibility_score = 0.0
+            elif true_applicants <= 0:
+                # If a program had available seats and no true applicants last year,
+                # it should be treated as highly accessible in the recommendation
+                # score, consistently with availability().
+                competition_ratio = 0.0
+                accessibility_score = 1.0
+            else:
+                competition_ratio = true_applicants / capacity
+                accessibility_score = min(capacity / true_applicants, 1.0)
 
             portfolio = candidate_portfolio_metrics(
                 candidate_label,

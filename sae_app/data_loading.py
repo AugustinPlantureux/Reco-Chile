@@ -225,7 +225,10 @@ def program_matches_filters(row: pd.Series, filters: dict | None) -> bool:
     selected_specialties = filters.get("specialty_sectors") or []
     if selected_specialties:
         specialty_sector = str(row.get(PROGRAM_SPECIALTY_SECTOR, UNKNOWN_FILTER_VALUE)).strip()
-        if track != TRACK_SPECIALIZED or specialty_sector not in selected_specialties:
+        # Specialty-area filters only apply to specialized/technical programs.
+        # General academic programs should remain visible when the family has
+        # explicitly included them through the track filter.
+        if track == TRACK_SPECIALIZED and specialty_sector not in selected_specialties:
             return False
 
     for filter_key, column_name in PROGRAM_FILTER_FIELD_CONFIG:
@@ -504,3 +507,80 @@ def required_cols() -> list[str]:
             f"cum_share_through_{tier}_2024",
         ]
     return cols
+
+
+def validate_cumulative_share_columns(
+    calib: pd.DataFrame,
+    *,
+    tolerance: float = 1e-6,
+) -> list[str]:
+    """Check before + share == through for every priority tier.
+
+    The calculation itself uses cum_share_before_* and priority_share_*.
+    cum_share_through_* is kept as a calibration integrity check so a malformed
+    calibration file is caught before the app silently computes with
+    inconsistent cumulative shares.
+    """
+    errors: list[str] = []
+
+    for tier in TIERS:
+        share_col = f"priority_share_{tier}_2024"
+        before_col = f"cum_share_before_{tier}_2024"
+        through_col = f"cum_share_through_{tier}_2024"
+        needed = [share_col, before_col, through_col]
+        if any(col not in calib.columns for col in needed):
+            # Missing columns are reported by required_cols() in app.py.
+            continue
+
+        share = pd.to_numeric(calib[share_col], errors="coerce")
+        before = pd.to_numeric(calib[before_col], errors="coerce")
+        through = pd.to_numeric(calib[through_col], errors="coerce")
+        expected_through = before + share
+
+        missing_or_invalid = share.isna() | before.isna() | through.isna()
+        if missing_or_invalid.any():
+            errors.append(
+                f"{tier}: {int(missing_or_invalid.sum())} row(s) with missing or "
+                f"non-numeric calibration share values in {share_col}, "
+                f"{before_col}, or {through_col}."
+            )
+
+        valid = ~missing_or_invalid
+        diff = (expected_through - through).abs()
+        inconsistent = valid & (diff > tolerance)
+
+        if inconsistent.any():
+            errors.append(
+                f"{through_col}: {int(inconsistent.sum())} row(s) where "
+                f"cum_share_before + priority_share differs from cum_share_through "
+                f"(max diff {float(diff[inconsistent].max()):.6g})."
+            )
+
+    return errors
+
+
+def validate_core_numeric_columns(calib: pd.DataFrame) -> list[str]:
+    """Check core numeric calibration fields before any simulation is run.
+
+    Missing capacity or true-applicant values would otherwise be converted to
+    0.0 by as_float() inside the calculation engine. That fallback is useful
+    for defensive parsing, but malformed calibration data should be reported at
+    startup instead of silently producing optimistic or pessimistic estimates.
+    """
+    checks = [
+        (CAPACITY, "missing, non-numeric, or negative"),
+        (TRUE_APP, "missing, non-numeric, or negative"),
+    ]
+    errors: list[str] = []
+
+    for col, description in checks:
+        if col not in calib.columns:
+            # Missing columns are reported by required_cols() in app.py.
+            continue
+
+        values = pd.to_numeric(calib[col], errors="coerce")
+        invalid = values.isna() | (values < 0)
+        if invalid.any():
+            errors.append(f"{col}: {int(invalid.sum())} row(s) with {description} values.")
+
+    return errors

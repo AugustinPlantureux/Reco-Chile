@@ -66,7 +66,7 @@ def norm_code(s: pd.Series) -> pd.Series:
 def as_bool(x) -> bool:
     if pd.isna(x):
         return False
-    return str(x).strip().lower() in {"1", "true", "yes", "y", "x", "oui"}
+    return str(x).strip().lower() in {"1", "true", "yes", "y", "x", "oui", "si", "sí", "s"}
 
 
 def as_float(x, default: float = 0.0) -> float:

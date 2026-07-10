@@ -60,10 +60,13 @@ def clean_wish_rows(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = False
         out[col] = out[col].map(as_bool).fillna(False).astype(bool)
 
-    has_priority = out[priority_cols].any(axis=1)
     has_program = out[PROGRAM] != ""
 
-    out = out[has_program | has_priority].copy().reset_index(drop=True)
+    # Rows without a selected program cannot be simulated and are dropped.
+    # Duplicate programs can happen through CSV import; keep the first one so
+    # Streamlit widget keys remain unique and the wish list stays valid.
+    out = out[has_program].copy().reset_index(drop=True)
+    out = out.drop_duplicates(subset=[PROGRAM], keep="first").reset_index(drop=True)
 
     out[WISH_RANK] = pd.to_numeric(out[WISH_RANK], errors="coerce")
     out[EQUIV_GROUP] = pd.to_numeric(out[EQUIV_GROUP], errors="coerce")
@@ -104,7 +107,7 @@ def parse_wishes(file_bytes: bytes, mapping: dict[str, pd.Series]) -> pd.DataFra
     elif {"rang_du_voeu", "programme"}.issubset(df.columns):
         out = pd.DataFrame({WISH_RANK: df["rang_du_voeu"], PROGRAM: df["programme"]})
     elif {"rbd", "program_code", "preference_number"}.issubset(df.columns):
-        labels = df["rbd"].astype(str).str.strip() + " || " + norm_code(df["program_code"])
+        labels = norm_code(df["rbd"]) + " || " + norm_code(df["program_code"])
         out = pd.DataFrame({WISH_RANK: df["preference_number"], PROGRAM: labels})
     else:
         raise ValueError(
@@ -197,9 +200,12 @@ def normalize_builder_wishes(
     out[EQUIV_GROUP] = out[EQUIV_GROUP].astype(int).clip(lower=1)
 
     if use_equivalence_classes:
-        # Preference groups determine the true preference order.
+        # Preference groups determine the true preference order. Compact group
+        # labels so 1, 1, 5 behaves like 1, 1, 2 for downstream weighting.
         # wish_rank is only the reference strict order used for preview/testing.
         out = out.sort_values([EQUIV_GROUP, WISH_RANK], kind="stable").reset_index(drop=True)
+        group_map = {old_group: i + 1 for i, old_group in enumerate(pd.unique(out[EQUIV_GROUP]))}
+        out[EQUIV_GROUP] = out[EQUIV_GROUP].map(group_map).astype(int)
         out[WISH_RANK] = np.arange(1, len(out) + 1)
     else:
         # In strict mode, the card order is the ranking.
@@ -236,6 +242,8 @@ def prepare_ordered_wishes(wishes: pd.DataFrame, use_equivalence_classes: bool) 
 
     if use_equivalence_classes:
         clean = clean.sort_values([EQUIV_GROUP, "_row_order"], kind="stable")
+        group_map = {old_group: i + 1 for i, old_group in enumerate(pd.unique(clean[EQUIV_GROUP]))}
+        clean[EQUIV_GROUP] = clean[EQUIV_GROUP].map(group_map).astype(int)
     else:
         clean = clean.sort_values([WISH_RANK, "_row_order"], kind="stable")
         clean[EQUIV_GROUP] = range(1, len(clean) + 1)

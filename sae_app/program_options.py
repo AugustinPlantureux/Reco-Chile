@@ -162,9 +162,15 @@ def compact_program_label(label: str) -> str:
     if not text:
         return ""
     if " · RBD " in text:
-        text = text.split(" · RBD ", 1)[0].strip()
-        if " — " in text:
-            text = text.split(" — ", 1)[0].strip()
+        before_rbd = text.split(" · RBD ", 1)[0].strip()
+        if " — " in before_rbd:
+            school_part, detail_part = before_rbd.split(" — ", 1)
+            # Legacy labels packed several metadata fields before the RBD
+            # suffix, e.g. "General H-C · Mixed · Full day". New compact
+            # labels may legitimately keep "· RBD" to disambiguate schools,
+            # so only strip legacy multi-field detail blocks.
+            if " · " in detail_part:
+                return school_part.strip()
     return text
 
 

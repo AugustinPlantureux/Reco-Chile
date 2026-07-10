@@ -4,7 +4,14 @@ import streamlit as st
 
 
 TRANSLATIONS = {
-    "en": {},
+    "en": {
+        "priority_sibling": "Sibling priority",
+        "priority_student": "Priority-student quota",
+        "priority_parent_civil_servant": "Civil-servant child priority",
+        "priority_ex_student": "Former-student priority",
+        "priority_already_registered": "Already-enrolled priority",
+        "no_priority": "No priority",
+    },
     "es": {
         "SAE admission-risk simulation": "Simulación de riesgo de admisión SAE",
         "MTB mode (admission 2026): SHA-256(RUN/IPE+RBD) percentile by school. Results are estimates based on last year's calibration data, not official admission guarantees.": "Modo MTB (admisión 2026): percentil SHA-256(RUN/IPE+RBD) por establecimiento. Los resultados son estimaciones basadas en la calibración del año anterior; no son garantías oficiales de admisión.",
@@ -16,6 +23,12 @@ TRANSLATIONS = {
         "Used to compute the SHA-256 percentile specific to each school. RUN format: 12.345.678-9. Dots are optional. For foreign students, enter the IPE.": "Se usa para calcular el percentil SHA-256 específico de cada establecimiento. Formato RUN: 12.345.678-9. Los puntos son opcionales. Para estudiantes extranjeros, ingresa el IPE.",
         "Missing columns: ": "Columnas faltantes: ",
         "Invalid {pop}: {n} program(s) have missing or non-positive lottery population.": "{n} programa(s) tienen una población de lotería faltante o no positiva en {pop}.",
+        "No valid wish could be matched to the program data. Check the imported wish list.": "No se pudo vincular ninguna preferencia válida con los datos de programas. Revisa la lista de preferencias importada.",
+        "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the imported wish list.": "Una preferencia en la prueba de clases de equivalencia no pudo vincularse con los valores de disponibilidad precalculados. Revisa la lista de preferencias importada.",
+        "Calibration cumulative-share columns are inconsistent. Check the calibration CSV before running the app.": "Las columnas acumuladas de calibración son incoherentes. Revisa el CSV de calibración antes de ejecutar la app.",
+        "Calibration cumulative-share columns are inconsistent or incomplete. Check the calibration CSV before running the app.": "Las columnas acumuladas de calibración son incoherentes o incompletas. Revisa el CSV de calibración antes de ejecutar la app.",
+        "Calibration numeric columns contain invalid values. Check the calibration CSV before running the app.": "Las columnas numéricas de calibración contienen valores inválidos. Revisa el CSV de calibración antes de ejecutar la app.",
+        "Some programs in the current wish list are no longer available in the loaded data and were removed: {programs}": "Algunos programas de la lista actual ya no están disponibles en los datos cargados y fueron eliminados: {programs}",
         "1. Start with the student's preferences": "1. Comenzar con las preferencias del estudiante",
         "Is the student's wish list already established?": "¿La lista de preferencias del estudiante ya está definida?",
         "Yes — I already have the list": "Sí — ya tengo la lista",
@@ -284,9 +297,11 @@ def display_outcome_label(value) -> str:
     if text == "Unmatched":
         return t("Unmatched")
     if " · RBD " in text:
-        text = text.split(" · RBD ", 1)[0].strip()
-        if " — " in text:
-            text = text.split(" — ", 1)[0].strip()
+        before_rbd = text.split(" · RBD ", 1)[0].strip()
+        if " — " in before_rbd:
+            school_part, detail_part = before_rbd.split(" — ", 1)
+            if " · " in detail_part:
+                return school_part.strip()
     return text
 
 

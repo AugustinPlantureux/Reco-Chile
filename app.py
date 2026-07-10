@@ -17,6 +17,7 @@ import streamlit as st
 
 from sae_app.constants import (
     CAPACITIES_PATH,
+    CAPACITY,
     EQUIV_GROUP,
     HARD_UNMATCHED_THRESHOLD,
     HASH_PCT,
@@ -28,6 +29,7 @@ from sae_app.constants import (
     PIE_FILTER_OPTIONS,
     POP,
     PROGRAM,
+    TRUE_APP,
     REGION,
     RELIGIOUS_FILTER_OPTIONS,
     RURALITY_FILTER_OPTIONS,
@@ -46,6 +48,8 @@ from sae_app.data_loading import (
     load_calibration,
     program_matches_filters,
     required_cols,
+    validate_core_numeric_columns,
+    validate_cumulative_share_columns,
 )
 from sae_app.i18n import format_option_label, initialize_language_selector, t
 from sae_app.mtb_engine import (
@@ -54,7 +58,7 @@ from sae_app.mtb_engine import (
     compute_equivalence_order_from_precomputed,
     precompute_equivalence_availability,
 )
-from sae_app.program_options import build_options, filter_program_options
+from sae_app.program_options import build_options, compact_program_label, filter_program_options
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.text_utils import as_bool
 from sae_app.ui_common import format_display_table
@@ -92,20 +96,19 @@ st.caption(
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
-    #st.caption(t("Capacities + 2024 calibration data are loaded from data/."))
+    st.caption(t("Capacities + 2024 calibration data are loaded from data/."))
 
     hard_threshold = HARD_UNMATCHED_THRESHOLD
     soft_threshold = SOFT_UNMATCHED_THRESHOLD
     if soft_threshold > hard_threshold:
         st.error(t("SOFT_UNMATCHED_THRESHOLD must be lower than or equal to HARD_UNMATCHED_THRESHOLD."))
         st.stop()
-    #
-    # st.caption(
-    #     t("Unmatched thresholds are fixed in code: hard {hard:.1%}, soft {soft:.1%}.", hard=hard_threshold, soft=soft_threshold)
-    # )
-    # st.caption(
-    #     t("Hard = Unmatched is shown first. Soft = Unmatched appears in the podium as a warning.")
-    # )
+    st.caption(
+        t("Unmatched thresholds are fixed in code: hard {hard:.1%}, soft {soft:.1%}.", hard=hard_threshold, soft=soft_threshold)
+    )
+    st.caption(
+        t("Hard = Unmatched is shown first. Soft = Unmatched appears in the podium as a warning.")
+    )
 
     national_student_id = st.text_input(
         t("Student RUN/IPE"),
@@ -119,6 +122,18 @@ calib = load_calibration(CAPACITIES_PATH.read_bytes())
 missing = [c for c in required_cols() if c not in calib.columns]
 if missing:
     st.error(t("Missing columns: ") + ", ".join(missing[:20]))
+    st.stop()
+
+calibration_numeric_errors = validate_core_numeric_columns(calib)
+if calibration_numeric_errors:
+    st.error(t("Calibration numeric columns contain invalid values. Check the calibration CSV before running the app."))
+    st.code("\n".join(calibration_numeric_errors[:10]))
+    st.stop()
+
+cumulative_share_errors = validate_cumulative_share_columns(calib)
+if cumulative_share_errors:
+    st.error(t("Calibration cumulative-share columns are inconsistent or incomplete. Check the calibration CSV before running the app."))
+    st.code("\n".join(cumulative_share_errors[:10]))
     st.stop()
 
 invalid_population = pd.to_numeric(calib[POP], errors="coerce").isna() | (pd.to_numeric(calib[POP], errors="coerce") <= 0)
@@ -405,9 +420,31 @@ if uploaded_wish_rows is not None and uploaded_wish_hash:
 
 editor_rows = st.session_state[editor_state_key].copy()
 if PROGRAM in editor_rows.columns:
-    editor_rows[PROGRAM] = editor_rows[PROGRAM].map(
-        lambda x: x if str(x).strip() in program_mapping or str(x).strip() == "" else ""
-    )
+    program_values = editor_rows[PROGRAM].fillna("").astype(str).str.strip()
+    unavailable_programs = sorted({p for p in program_values if p and p not in program_mapping})
+
+    if unavailable_programs:
+        shown_programs = [compact_program_label(p) for p in unavailable_programs[:5]]
+        if len(unavailable_programs) > len(shown_programs):
+            shown_programs.append("...")
+
+        st.warning(
+            t(
+                "Some programs in the current wish list are no longer available in the loaded data and were removed: {programs}",
+                programs=", ".join(shown_programs),
+            )
+        )
+
+        editor_rows[PROGRAM] = program_values.map(
+            lambda x: x if x in program_mapping or x == "" else ""
+        )
+        st.session_state[editor_state_key] = clean_wish_rows(editor_rows)
+        invalidate_simulation_state(
+            simulation_done_key=simulation_done_key,
+            simulation_result_key=simulation_result_key,
+            simulation_student_id_key=simulation_student_id_key,
+        )
+        editor_rows = st.session_state[editor_state_key].copy()
 
 current_program_values = (
     editor_rows.get(PROGRAM, pd.Series(dtype=str))

@@ -71,9 +71,10 @@ COMMUNE_COORDINATES_PATH = DATA_DIR / "commune_coordinates.csv"
 
 GEOCODING_TIMEOUT_SECONDS = 8
 GEOCODING_USER_AGENT = "sae-admission-risk-simulator/1.0"
-# Nominatim's usage policy caps free usage at 1 request/second. This is enforced
-# process-wide in geo.py regardless of how many sessions request geocoding
-# concurrently.
+# Nominatim's usage policy caps free usage at 1 request/second. geo.py enforces
+# this within a single Python process, regardless of how many Streamlit sessions
+# request geocoding concurrently in that process. Multi-worker deployments need
+# shared throttling or a dedicated geocoding service.
 NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
 
 # Embedded RBD -> Region lookup built from the 2025 individual-level preferences file.

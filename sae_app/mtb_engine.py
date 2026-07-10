@@ -86,8 +86,7 @@ def mtb_hash(student_id: str, rbd) -> dict:
 def pct_to_rank(percentile: float, n: int) -> int:
     """Convert a 0-best/1-worst percentile into an integer rank among n candidates."""
     n = max(int(n), 1)
-    bucket = int(np.floor(np.clip(percentile, 0, 1) * n))
-    return int(1 + min(bucket, n - 1))
+    return int(1 + np.floor(np.clip(percentile, 0, 1) * max(n - 1, 0)))
 
 
 def attach_mtb_hashes(
@@ -221,6 +220,10 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
 def compute_from_availability_rows(rows: list[dict] | pd.DataFrame) -> pd.DataFrame:
     """Aggregate already-computed wish availabilities into assignment chances."""
     choices = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+    if choices.empty or "availability_probability" not in choices.columns:
+        raise ValueError(
+            t("No valid wish could be matched to the program data. Check the imported wish list.")
+        )
     choices["cumulative_unavailable_before_choice"] = (
         (1 - choices["availability_probability"]).cumprod().shift(1).fillna(1)
     )
@@ -237,15 +240,15 @@ def compute(
     wishes: pd.DataFrame,
     mapping: dict[str, pd.Series],
 ) -> pd.DataFrame:
-    clean = wishes[wishes[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK)
+    clean = wishes[wishes[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK, kind="stable")
     if clean.empty:
         raise ValueError(t("Add at least one valid wish."))
 
-    rows = [
-        availability(wish, mapping[wish[PROGRAM]])
-        for _, wish in clean.iterrows()
-        if wish[PROGRAM] in mapping
-    ]
+    rows = []
+    for _, wish in clean.iterrows():
+        label = str(wish.get(PROGRAM, "")).strip()
+        if label in mapping:
+            rows.append(availability(wish, mapping[label]))
 
     return compute_from_availability_rows(rows)
 
@@ -270,6 +273,11 @@ def precompute_equivalence_availability(
         label = str(wish.get(PROGRAM, "")).strip()
         if label and label in mapping:
             lookup[wish_availability_cache_key(wish)] = availability(wish, mapping[label])
+
+    if not lookup:
+        raise ValueError(
+            t("No valid wish could be matched to the program data. Check the imported wish list.")
+        )
     return lookup
 
 
@@ -278,10 +286,20 @@ def compute_equivalence_order_from_precomputed(
     availability_lookup: dict[tuple, dict],
 ) -> pd.DataFrame:
     """Recompute only cumulative assignment probabilities for one permutation."""
-    clean = strict_order[strict_order[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK)
+    clean = strict_order[strict_order[PROGRAM].astype(str).str.strip() != ""].sort_values(WISH_RANK, kind="stable")
+    if clean.empty:
+        raise ValueError(t("Add at least one valid wish."))
+
     rows = []
     for _, wish in clean.iterrows():
-        cached = availability_lookup[wish_availability_cache_key(wish)].copy()
+        key = wish_availability_cache_key(wish)
+        if key not in availability_lookup:
+            raise ValueError(
+                t(
+                    "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the imported wish list."
+                )
+            )
+        cached = availability_lookup[key].copy()
         cached["wish_rank"] = int(wish[WISH_RANK])
         rows.append(cached)
     return compute_from_availability_rows(rows)

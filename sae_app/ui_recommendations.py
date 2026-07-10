@@ -105,8 +105,14 @@ def render_similar_program_recommendations(
         st.caption(
             t("Enter an address, then click the button to compute recommendation distances from home instead of the current wish-list centroid.")
         )
-        address_key = f"{editor_widget_key_base}_home_address"
-        geo_key = f"{editor_widget_key_base}_home_geo"
+        # Keep recommendation/address state outside the wish-editor namespace.
+        # clear_wish_editor_widget_state(editor_widget_key_base) deletes every
+        # key starting with editor_widget_key_base after wish-list edits; using
+        # a separate prefix prevents the family home address and geocoded point
+        # from being erased when wishes are added, removed, or reordered.
+        recommendation_widget_key_base = f"recommendations_{editor_widget_key_base}"
+        address_key = f"{recommendation_widget_key_base}_home_address"
+        geo_key = f"{recommendation_widget_key_base}_home_geo"
         home_address = st.text_input(
             t("Student home address"),
             key=address_key,
@@ -117,12 +123,12 @@ def render_similar_program_recommendations(
             geocode_clicked = st.button(
                 t("Use this address for distance"),
                 disabled=not bool(str(home_address or "").strip()),
-                key=f"{editor_widget_key_base}_geocode_address",
+                key=f"{recommendation_widget_key_base}_geocode_address",
             )
         with address_cols[1]:
             clear_address_clicked = st.button(
                 t("Clear address"),
-                key=f"{editor_widget_key_base}_clear_address",
+                key=f"{recommendation_widget_key_base}_clear_address",
             )
 
         if geocode_clicked:
