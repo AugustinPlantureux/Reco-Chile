@@ -132,7 +132,7 @@ def parse_wishes(file_bytes: bytes, mapping: dict[str, pd.Series]) -> pd.DataFra
     for col in PRIORITIES + [SAFETY]:
         out[col] = df[col].map(as_bool) if col in df.columns else False
 
-    return out.sort_values(WISH_RANK).reset_index(drop=True) if not out.empty else empty_wishes()
+    return out.sort_values(WISH_RANK, kind="stable").reset_index(drop=True) if not out.empty else empty_wishes()
 
 
 def uploaded_lottery_columns(file_bytes: bytes) -> list[str]:

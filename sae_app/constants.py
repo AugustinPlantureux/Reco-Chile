@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Set to True during local development to display full Python tracebacks.
+APP_DEBUG = False
+
 # ---------------------------------------------------------------------------
 # Data columns
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from sae_app.constants import (
+    APP_DEBUG,
     CAPACITIES_PATH,
     CAPACITY,
     EQUIV_GROUP,
@@ -96,19 +97,11 @@ st.caption(
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.caption(t("Capacities + 2024 calibration data are loaded from data/."))
-
     hard_threshold = HARD_UNMATCHED_THRESHOLD
     soft_threshold = SOFT_UNMATCHED_THRESHOLD
     if soft_threshold > hard_threshold:
         st.error(t("SOFT_UNMATCHED_THRESHOLD must be lower than or equal to HARD_UNMATCHED_THRESHOLD."))
         st.stop()
-    st.caption(
-        t("Unmatched thresholds are fixed in code: hard {hard:.1%}, soft {soft:.1%}.", hard=hard_threshold, soft=soft_threshold)
-    )
-    st.caption(
-        t("Hard = Unmatched is shown first. Soft = Unmatched appears in the podium as a warning.")
-    )
 
     national_student_id = st.text_input(
         t("Student RUN/IPE"),
@@ -618,7 +611,8 @@ if st.button(t("Calculate unmatched risk"), type="primary"):
 
     except Exception as exc:
         st.error(t("Unexpected error during the simulation."))
-        st.exception(exc)
+        if APP_DEBUG:
+            st.exception(exc)
 
 if st.session_state.get(simulation_done_key, False):
     if not calculated_now:

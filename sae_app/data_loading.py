@@ -8,6 +8,7 @@ not know anything about Streamlit widgets or the recommendation engine.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +49,7 @@ from sae_app.constants import (
     POP,
     TRUE_APP,
 )
-from sae_app.text_utils import clean_optional_value, norm_code, parse_coordinate
+from sae_app.text_utils import clean_optional_value, clean_text, norm_code, parse_coordinate
 
 # ---------------------------------------------------------------------------
 # CSV reading utilities
@@ -253,35 +254,69 @@ def filters_are_active(filters: dict | None) -> bool:
 # (data/programmes_chili_criteres_recommandation.csv)
 # ---------------------------------------------------------------------------
 
+def _program_descriptor_key(value: str) -> str:
+    """Normalize program-name fragments before matching known descriptors."""
+    key = clean_text(value, default="", lower=True, strip_accents=True)
+    key = key.replace("º", "o").replace("°", "o")
+    key = re.sub(r"[^a-z0-9]+", " ", key)
+    return " ".join(key.split())
+
+
+def _is_first_grade_secondary_fragment(value: str) -> bool:
+    """Return True for common variants of the repeated 1º medio prefix."""
+    key = _program_descriptor_key(value)
+    return key in {"1 medio", "1o medio", "primero medio", "1st grade secondary"}
+
+
 def compact_program_name(name: str) -> str:
     """Convert the reconstructed program name into a short English label.
 
     The source file contains concise reconstructed names such as
     "1º medio — Général H-C — Mixte — jornada completa". The dropdown is
-    easier to scan if the repeated grade is removed and the stable descriptors
-    are translated.
+    easier to scan if the repeated grade is removed and stable descriptors are
+    translated. Matching is intentionally tolerant to accents, case, and the
+    common º/° variants found in spreadsheet exports.
     """
-    text = str(name or "").strip()
+    text = " ".join(str(name or "").strip().split())
     if not text:
         return UNKNOWN_PROGRAM_NAME
 
-    replacements = {
-        "1º medio": "1st grade secondary",
-        "Général H-C": "General H-C",
-        "Spécialité TP": "Technical-vocational",
-        "Mixte": "Mixed",
-        "garçons": "Boys",
+    descriptor_translations = {
+        "general h c": "General H-C",
+        "general hc": "General H-C",
+        "specialite tp": "Technical-vocational",
+        "speciality tp": "Technical-vocational",
+        "especialidad tp": "Technical-vocational",
+        "mixte": "Mixed",
+        "mixto": "Mixed",
+        "mixed": "Mixed",
+        "garcons": "Boys",
+        "hombres": "Boys",
+        "varones": "Boys",
+        "boys": "Boys",
         "filles": "Girls",
+        "mujeres": "Girls",
+        "girls": "Girls",
         "jornada completa": "Full day",
-        "jornada mañana": "Morning",
+        "full day": "Full day",
+        "jornada manana": "Morning",
+        "morning": "Morning",
         "jornada tarde": "Afternoon",
+        "afternoon": "Afternoon",
     }
-    for old_value, new_value in replacements.items():
-        text = text.replace(old_value, new_value)
 
-    parts = [part.strip() for part in text.split("—") if part.strip()]
-    if parts and parts[0].lower().startswith("1st grade"):
-        parts = parts[1:]
+    raw_parts = [
+        part.strip()
+        for part in re.split(r"\s*(?:—|–)\s*|\s+-\s+", text)
+        if part.strip()
+    ]
+
+    parts = []
+    for part in raw_parts:
+        if _is_first_grade_secondary_fragment(part):
+            continue
+        key = _program_descriptor_key(part)
+        parts.append(descriptor_translations.get(key, part))
 
     if not parts:
         return UNKNOWN_PROGRAM_NAME
@@ -292,7 +327,6 @@ def compact_program_name(name: str) -> str:
         return " · ".join([main] + rest)
 
     return " · ".join(parts)
-
 
 def compact_school_name(name: str) -> str:
     """Return a readable school name for the program dropdown."""
