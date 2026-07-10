@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from sae_app.constants import EQUIV_GROUP, PROGRAM, WISH_RANK
-from sae_app.geo import geocode_chilean_address, valid_lat_lon
+from sae_app.geo import geocode_chilean_address, geocoding_precision_warning_key, valid_lat_lon
 from sae_app.i18n import t
 from sae_app.recommendations import (
     RECOMMENDATION_COMPETITION_WEIGHT,
@@ -138,12 +138,27 @@ def render_similar_program_recommendations(
         if stored_geo and stored_geo.get("address") == normalized_current_address:
             if stored_geo.get("ok") and valid_lat_lon(stored_geo.get("lat"), stored_geo.get("lon")):
                 home_geo_reference = stored_geo
-                st.success(
-                    t(
-                        "Distances will be computed from: {address}",
-                        address=stored_geo.get("display_name", normalized_current_address),
+                display_geocoded_address = stored_geo.get("display_name", normalized_current_address)
+                precision = stored_geo.get("precision", "approximate")
+
+                if precision == "address":
+                    st.success(
+                        t(
+                            "Distances will be computed from the confirmed address: {address}",
+                            address=display_geocoded_address,
+                        )
                     )
-                )
+                else:
+                    warning_key = geocoding_precision_warning_key(stored_geo)
+                    st.warning(
+                        t(
+                            "{warning} Location used: {address}",
+                            warning=t(warning_key)
+                            if warning_key
+                            else t("The geocoded location is approximate. Distances should be interpreted carefully."),
+                            address=display_geocoded_address,
+                        )
+                    )
             elif normalized_current_address:
                 st.warning(t("Address could not be geocoded: {error}", error=stored_geo.get("error", "")))
         elif normalized_current_address and stored_geo:

@@ -36,6 +36,9 @@ PRIORITY_STUDENT_QUOTA = 0.15   # 15% reserved for priority students
 HARD_UNMATCHED_THRESHOLD = 0.027   # 2.7%: strong unmatched-risk alert
 SOFT_UNMATCHED_THRESHOLD = 0.004   # 0.4%: lighter podium warning
 MAX_EXACT_EQUIV_PERMUTATIONS = 10000
+# If compatible strict orders keep the same predicted school but change its
+# final chance by at least 0.5 percentage point, show an intermediate warning.
+EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD = 0.005
 
 PRIORITIES = [
     "priority_sibling",
@@ -68,7 +71,6 @@ COMMUNE_COORDINATES_PATH = DATA_DIR / "commune_coordinates.csv"
 
 GEOCODING_TIMEOUT_SECONDS = 8
 GEOCODING_USER_AGENT = "sae-admission-risk-simulator/1.0"
-
 # Nominatim's usage policy caps free usage at 1 request/second. This is enforced
 # process-wide in geo.py regardless of how many sessions request geocoding
 # concurrently.

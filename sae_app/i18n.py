@@ -254,6 +254,13 @@ TRANSLATIONS = {
         "The geocoded result is outside Chile or has invalid coordinates.": "El resultado geocodificado está fuera de Chile o tiene coordenadas inválidas.",
         "Geocoding service returned status {status}.": "El servicio de geocodificación devolvió el estado {status}.",
         "Could not reach the geocoding service: {error}": "No se pudo contactar el servicio de geocodificación: {error}",
+        'Distances will be computed from the confirmed address: {address}': 'Las distancias se calcularán desde la dirección confirmada: {address}',
+        '{warning} Location used: {address}': '{warning} Ubicación utilizada: {address}',
+        'The geocoded location is approximate. Distances should be interpreted carefully.': 'La ubicación geocodificada es aproximada. Las distancias deben interpretarse con cuidado.',
+        'The geocoder found the street, but could not confirm the exact street number. Distances are computed from an approximate street-level location.': 'El geocodificador encontró la calle, pero no pudo confirmar el número exacto. Las distancias se calculan desde una ubicación aproximada a nivel de calle.',
+        'The geocoder found the street, but not an exact address point. Distances are computed from an approximate street-level location.': 'El geocodificador encontró la calle, pero no un punto de dirección exacto. Las distancias se calculan desde una ubicación aproximada a nivel de calle.',
+        'The geocoder could only identify the city or municipality. Distances are approximate.': 'El geocodificador solo pudo identificar la ciudad o comuna. Las distancias son aproximadas.',
+        'The geocoder returned only an approximate location. Distances should be interpreted carefully.': 'El geocodificador devolvió solo una ubicación aproximada. Las distancias deben interpretarse con cuidado.',
         "Could not read the geocoding response: {error}": "No se pudo leer la respuesta de geocodificación: {error}",
     },
 }

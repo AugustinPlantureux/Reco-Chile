@@ -8,6 +8,7 @@ wish list.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -32,21 +33,6 @@ from sae_app.data_loading import first_existing_column, read_csv_path
 from sae_app.i18n import t
 from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import normalize_geo_key, parse_coordinate
-
-_nominatim_lock = threading.Lock()
-_nominatim_last_call_at = 0.0
-
-
-def _throttle_nominatim() -> None:
-    """Block until at least NOMINATIM_MIN_INTERVAL_SECONDS have passed since the
-    last outbound call, enforced across all sessions in this process.
-    """
-    global _nominatim_last_call_at
-    with _nominatim_lock:
-        wait = _nominatim_last_call_at + NOMINATIM_MIN_INTERVAL_SECONDS - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        _nominatim_last_call_at = time.monotonic()
 
 
 @st.cache_data(show_spinner=False)
@@ -162,12 +148,399 @@ def normalize_address_for_geocoding(address: str) -> str:
     return text
 
 
+GEOCODING_RESULT_LIMIT = 10
+
+ADDRESS_LEVEL_ADDRESSTYPES = {
+    "house",
+    "building",
+    "amenity",
+    "shop",
+    "office",
+    "tourism",
+    "leisure",
+}
+
+STREET_LEVEL_ADDRESSTYPES = {
+    "road",
+    "residential",
+    "pedestrian",
+    "footway",
+    "cycleway",
+    "path",
+}
+
+ROAD_ADDRESS_KEYS = (
+    "road",
+    "pedestrian",
+    "footway",
+    "cycleway",
+    "path",
+    "residential",
+)
+
+CITY_ADDRESS_KEYS = (
+    "city",
+    "town",
+    "village",
+    "municipality",
+    "county",
+    "state_district",
+)
+
+# Nominatim candidate-scoring weights. These stay named and local to geo.py
+# because they only tune the internal choice of the best geocoding candidate.
+HOUSE_NUMBER_MATCH_BONUS = 80.0
+HOUSE_NUMBER_MISMATCH_PENALTY = -60.0
+HOUSE_NUMBER_MISSING_PENALTY = -20.0
+ROAD_MATCH_WEIGHT = 35.0
+CITY_MATCH_WEIGHT = 20.0
+ADDRESS_LEVEL_TYPE_BONUS = 12.0
+STREET_LEVEL_TYPE_BONUS = 5.0
+ROAD_MATCH_PRECISION_THRESHOLD = 0.5
+ADDRESS_PRECISION_BONUS = 30.0
+STREET_PRECISION_BONUS = 10.0
+CITY_PRECISION_PENALTY = -10.0
+APPROXIMATE_PRECISION_PENALTY = -20.0
+
+NUMERIC_STREET_CONTINUATIONS = {
+    "de",
+    "del",
+    "la",
+    "las",
+    "los",
+    "norte",
+    "sur",
+    "oriente",
+    "poniente",
+    "este",
+    "oeste",
+}
+
+ROAD_TYPE_WORDS = {
+    "avenida",
+    "av",
+    "avda",
+    "calle",
+    "pasaje",
+    "pje",
+    "camino",
+    "ruta",
+    "sector",
+}
+
+UNIT_WORDS = {
+    "depto",
+    "departamento",
+    "dpto",
+    "piso",
+    "oficina",
+    "torre",
+    "block",
+    "bloque",
+}
+
+_nominatim_lock = threading.Lock()
+_nominatim_last_call_at = 0.0
+
+
+def _throttle_nominatim() -> None:
+    """Respect Nominatim's public-service rate limit within this Python process."""
+    global _nominatim_last_call_at
+    with _nominatim_lock:
+        now = time.monotonic()
+        elapsed = now - _nominatim_last_call_at
+        wait = max(0.0, NOMINATIM_MIN_INTERVAL_SECONDS - elapsed)
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call_at = time.monotonic()
+
+
+def _clean_house_number(value: str) -> str:
+    """Normalize a house number for comparison."""
+    return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
+
+
+def _extract_requested_house_number(address: str) -> str:
+    """
+    Extract a likely house number from the first address segment.
+
+    Conservative examples:
+    - "1020 Avenida Errázuriz, Valparaíso" -> "1020"
+    - "Avenida Errázuriz 1020, Valparaíso" -> "1020"
+    - "21 de Mayo 1020, Valparaíso" -> "1020"
+    - "21 de Mayo, Valparaíso" -> ""
+    - "5 Norte, Viña del Mar" -> ""
+    """
+    first_part = str(address or "").split(",", 1)[0].strip()
+    if not first_part:
+        return ""
+
+    matches = list(re.finditer(r"\b\d{1,6}[A-Za-z]?\b", first_part))
+    if not matches:
+        return ""
+
+    usable_matches = []
+
+    for match in matches:
+        before = first_part[:match.start()].strip()
+        after = first_part[match.end():].strip()
+
+        before_tokens = normalize_geo_key(before).split()
+        after_tokens = normalize_geo_key(after).split()
+
+        previous_token = before_tokens[-1] if before_tokens else ""
+        next_token = after_tokens[0] if after_tokens else ""
+
+        # Apartment/unit numbers should not replace the house number:
+        # "Av Errázuriz 1020 depto 5" should keep 1020, not 5.
+        if previous_token in UNIT_WORDS:
+            continue
+
+        # A single number followed by "de", "norte", "oriente", etc. is often
+        # part of the street name: "21 de Mayo", "5 Norte", "7 Oriente".
+        if len(matches) == 1 and next_token in NUMERIC_STREET_CONTINUATIONS:
+            return ""
+
+        # "Calle 5" / "Pasaje 7" can be a street name rather than a house number.
+        # Be conservative when the only number is immediately after a road-type word.
+        if len(matches) == 1 and previous_token in ROAD_TYPE_WORDS and not after_tokens:
+            return ""
+
+        usable_matches.append(match)
+
+    if not usable_matches:
+        return ""
+
+    # When several numbers appear, the last usable one is usually the house
+    # number: "21 de Mayo 1020", "Avenida 5 Norte 1020".
+    if len(usable_matches) >= 2:
+        return _clean_house_number(usable_matches[-1].group(0))
+
+    only = usable_matches[0]
+    before = first_part[:only.start()].strip()
+    after = first_part[only.end():].strip()
+
+    before_tokens = normalize_geo_key(before).split()
+    after_tokens = normalize_geo_key(after).split()
+    next_token = after_tokens[0] if after_tokens else ""
+
+    # Leading-number form: "1020 Avenida Errázuriz" or "1020 Errázuriz".
+    # Reject only the common numeric-street pattern, such as "21 de Mayo".
+    if only.start() == 0:
+        if next_token in NUMERIC_STREET_CONTINUATIONS:
+            return ""
+        return _clean_house_number(only.group(0))
+
+    # Trailing-number form: "Avenida Errázuriz 1020".
+    if not after:
+        return _clean_house_number(only.group(0))
+
+    # Trailing house number followed by unit details: "Errázuriz 1020 depto 5".
+    if after_tokens and after_tokens[0] in UNIT_WORDS:
+        return _clean_house_number(only.group(0))
+
+    return ""
+
+
+def _expected_street_key(address: str, requested_house_number: str) -> str:
+    """Return the likely street name, with the requested house number removed."""
+    first_part = str(address or "").split(",", 1)[0]
+
+    if requested_house_number:
+        first_part = re.sub(
+            r"\b\d{1,6}[A-Za-z]?\b",
+            lambda match: " " if _clean_house_number(match.group(0)) == requested_house_number else match.group(0),
+            first_part,
+            flags=re.IGNORECASE,
+        )
+
+    return normalize_geo_key(first_part)
+
+
+def _nominatim_address(result: dict) -> dict:
+    """Safely return Nominatim's address-details dictionary."""
+    address = result.get("address", {})
+    return address if isinstance(address, dict) else {}
+
+
+def _first_address_value(address: dict, keys: tuple[str, ...]) -> str:
+    """Return the first non-empty address field among several possible keys."""
+    for key in keys:
+        value = str(address.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _token_match_strength(expected: str, candidate: str) -> float:
+    """
+    Simple textual match score between 0 and 1.
+
+    This avoids an extra dependency and handles cases like "Avenida Errázuriz"
+    vs "Av. Errázuriz" or display names containing the road.
+    """
+    expected_key = normalize_geo_key(expected)
+    candidate_key = normalize_geo_key(candidate)
+
+    if not expected_key or not candidate_key:
+        return 0.0
+
+    if expected_key == candidate_key:
+        return 1.0
+
+    if expected_key in candidate_key or candidate_key in expected_key:
+        return 0.9
+
+    expected_tokens = set(expected_key.split())
+    candidate_tokens = set(candidate_key.split())
+
+    if not expected_tokens or not candidate_tokens:
+        return 0.0
+
+    return len(expected_tokens & candidate_tokens) / max(
+        len(expected_tokens),
+        len(candidate_tokens),
+    )
+
+
+def _score_nominatim_result(result: dict, original_address: str) -> dict:
+    """
+    Score one Nominatim result.
+
+    The score prioritizes matching house number, street, city/municipality, and
+    address-level results. Precision is intentionally conservative: the UI should
+    warn families whenever the location is only street/city/approximate-level.
+    """
+    address = _nominatim_address(result)
+    query_key = normalize_geo_key(original_address)
+
+    requested_house_number = _extract_requested_house_number(original_address)
+    returned_house_number = _clean_house_number(address.get("house_number", ""))
+
+    expected_street = _expected_street_key(original_address, requested_house_number)
+    returned_road = _first_address_value(address, ROAD_ADDRESS_KEYS)
+    display_name = str(result.get("display_name", "")).strip()
+
+    addresstype = normalize_geo_key(result.get("addresstype", ""))
+    result_type = normalize_geo_key(result.get("type", ""))
+    result_class = normalize_geo_key(result.get("class", result.get("category", "")))
+
+    score = 0.0
+
+    house_number_confirmed = bool(
+        requested_house_number and returned_house_number == requested_house_number
+    )
+
+    if requested_house_number:
+        if house_number_confirmed:
+            score += HOUSE_NUMBER_MATCH_BONUS
+        elif returned_house_number:
+            # A different returned house number is worse than a street-level result.
+            score += HOUSE_NUMBER_MISMATCH_PENALTY
+        else:
+            # Street-level result: usable, but not exact.
+            score += HOUSE_NUMBER_MISSING_PENALTY
+
+    road_match = max(
+        _token_match_strength(expected_street, returned_road),
+        _token_match_strength(expected_street, display_name),
+    )
+    score += ROAD_MATCH_WEIGHT * road_match
+
+    city_match = 0.0
+    for key in CITY_ADDRESS_KEYS:
+        value = normalize_geo_key(address.get(key, ""))
+        if value and value in query_key:
+            city_match = 1.0
+            break
+
+    score += CITY_MATCH_WEIGHT * city_match
+
+    is_address_level = (
+        addresstype in ADDRESS_LEVEL_ADDRESSTYPES
+        or result_type in ADDRESS_LEVEL_ADDRESSTYPES
+        or result_class in ADDRESS_LEVEL_ADDRESSTYPES
+    )
+    is_street_level = addresstype in STREET_LEVEL_ADDRESSTYPES or result_type in STREET_LEVEL_ADDRESSTYPES
+
+    if is_address_level:
+        score += ADDRESS_LEVEL_TYPE_BONUS
+    elif is_street_level:
+        score += STREET_LEVEL_TYPE_BONUS
+
+    if requested_house_number and house_number_confirmed and road_match >= ROAD_MATCH_PRECISION_THRESHOLD:
+        precision = "address"
+    elif not requested_house_number and returned_house_number and road_match >= ROAD_MATCH_PRECISION_THRESHOLD:
+        precision = "address"
+    elif road_match >= ROAD_MATCH_PRECISION_THRESHOLD or is_street_level:
+        precision = "street"
+    elif city_match:
+        precision = "city"
+    else:
+        precision = "approximate"
+
+    if precision == "address":
+        score += ADDRESS_PRECISION_BONUS
+    elif precision == "street":
+        score += STREET_PRECISION_BONUS
+    elif precision == "city":
+        score += CITY_PRECISION_PENALTY
+    else:
+        score += APPROXIMATE_PRECISION_PENALTY
+
+    return {
+        "score": score,
+        "precision": precision,
+        "house_number_requested": requested_house_number,
+        "house_number_found": returned_house_number,
+        "house_number_confirmed": house_number_confirmed,
+        "road_match": road_match,
+        "city_match": city_match,
+    }
+
+
+def geocoding_precision_warning_key(geo_result: dict) -> str:
+    """Return the untranslated warning key for a non-exact geocoding result."""
+    precision = str((geo_result or {}).get("precision", "approximate"))
+    requested_house_number = str((geo_result or {}).get("house_number_requested", "")).strip()
+
+    if precision == "address":
+        return ""
+
+    if requested_house_number and precision == "street":
+        return (
+            "The geocoder found the street, but could not confirm the exact street number. "
+            "Distances are computed from an approximate street-level location."
+        )
+
+    if precision == "street":
+        return (
+            "The geocoder found the street, but not an exact address point. "
+            "Distances are computed from an approximate street-level location."
+        )
+
+    if precision == "city":
+        return (
+            "The geocoder could only identify the city or municipality. "
+            "Distances are approximate."
+        )
+
+    return (
+        "The geocoder returned only an approximate location. "
+        "Distances should be interpreted carefully."
+    )
+
+
 @st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
 def geocode_chilean_address(address: str) -> dict:
     """Geocode a family-entered address using OpenStreetMap/Nominatim.
 
     The app does not store the address permanently; Streamlit only keeps the
     returned coordinates in session/cache to avoid repeated calls on reruns.
+
+    This version asks Nominatim for several candidates and selects the best one
+    with a conservative precision score. It avoids treating a street-level match
+    as if it were an exact house-number match.
     """
     original_address = " ".join(str(address or "").strip().split())
     query = normalize_address_for_geocoding(original_address)
@@ -177,9 +550,10 @@ def geocode_chilean_address(address: str) -> dict:
     params = urllib.parse.urlencode({
         "q": query,
         "format": "json",
-        "limit": 1,
+        "limit": GEOCODING_RESULT_LIMIT,
         "addressdetails": 1,
         "countrycodes": "cl",
+        "dedupe": 0,
     })
     url = f"https://nominatim.openstreetmap.org/search?{params}"
     request = urllib.request.Request(
@@ -225,23 +599,54 @@ def geocode_chilean_address(address: str) -> dict:
         }
 
     if not results:
-        return {"ok": False, "address": original_address, "error": t("No result found for this address in Chile.")}
+        return {
+            "ok": False,
+            "address": original_address,
+            "error": t("No result found for this address in Chile."),
+        }
 
-    best = results[0]
-    lat = parse_coordinate(best.get("lat"))
-    lon = parse_coordinate(best.get("lon"))
-    if not valid_lat_lon(lat, lon):
+    scored_results = []
+
+    for rank, result in enumerate(results, start=1):
+        lat = parse_coordinate(result.get("lat"))
+        lon = parse_coordinate(result.get("lon"))
+
+        if not valid_lat_lon(lat, lon):
+            continue
+
+        score_info = _score_nominatim_result(result, original_address)
+        scored_results.append({
+            "rank": rank,
+            "result": result,
+            "lat": float(lat),
+            "lon": float(lon),
+            **score_info,
+        })
+
+    if not scored_results:
         return {
             "ok": False,
             "address": original_address,
             "error": t("The geocoded result is outside Chile or has invalid coordinates."),
         }
 
+    best = max(scored_results, key=lambda item: (item["score"], -item["rank"]))
+    best_result = best["result"]
+
     return {
         "ok": True,
         "address": original_address,
         "query": query,
-        "lat": float(lat),
-        "lon": float(lon),
-        "display_name": str(best.get("display_name", query)),
+        "lat": best["lat"],
+        "lon": best["lon"],
+        "display_name": str(best_result.get("display_name", query)),
+        "precision": best["precision"],
+        "score": float(best["score"]),
+        "candidate_count": len(results),
+        "selected_candidate_rank": int(best["rank"]),
+        "house_number_requested": best.get("house_number_requested", ""),
+        "house_number_found": best.get("house_number_found", ""),
+        "house_number_confirmed": bool(best.get("house_number_confirmed", False)),
+        "road_match": float(best.get("road_match", 0.0)),
+        "city_match": float(best.get("city_match", 0.0)),
     }

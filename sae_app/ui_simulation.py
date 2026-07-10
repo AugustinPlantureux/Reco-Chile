@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import streamlit as st
 
-from sae_app.constants import HARD_UNMATCHED_THRESHOLD, SOFT_UNMATCHED_THRESHOLD
+from sae_app.constants import (
+    EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD,
+    HARD_UNMATCHED_THRESHOLD,
+    SOFT_UNMATCHED_THRESHOLD,
+)
 from sae_app.i18n import display_outcome_label, t
 from sae_app.ui_common import format_display_table
 
-
-# If compatible strict orders keep the same predicted school but change its
-# final chance by at least 0.5 percentage point, show an intermediate warning.
-EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD = 0.005
 
 
 def format_choices_table(choices):
