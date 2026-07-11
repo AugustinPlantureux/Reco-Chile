@@ -39,11 +39,12 @@ from sae_app.geo import (
     commune_coordinate_lookup,
     haversine_km,
     home_distance_filter_is_reliable,
-    program_coordinate_source_is_reliable,
+    program_coordinate_reference_priority,
     program_coordinates,
     proximity_from_distance,
     valid_lat_lon,
 )
+from sae_app.errors import CandidateEvaluationError
 from sae_app.i18n import t
 from sae_app.mtb_engine import attach_mtb_hashes, availability
 from sae_app.program_options import ProgramRecord
@@ -176,6 +177,9 @@ def build_wish_profile(
                 "lon": lon,
                 "weight": weight,
                 "coordinate_source": coordinate_source,
+                "reference_priority": program_coordinate_reference_priority(
+                    coordinate_source
+                ),
             })
 
         for col, _, _ in RECOMMENDATION_CRITERIA:
@@ -189,16 +193,16 @@ def build_wish_profile(
     total_wish_weight = max(float(profile["total_wish_weight"]), 1e-9)
 
     if geo_rows:
-        reliable_geo_rows = [
+        best_reference_priority = max(g["reference_priority"] for g in geo_rows)
+        reference_geo_rows = [
             g for g in geo_rows
-            if program_coordinate_source_is_reliable(g["coordinate_source"])
+            if g["reference_priority"] == best_reference_priority
         ]
-        reference_geo_rows = reliable_geo_rows or geo_rows
         geo_weight = sum(g["weight"] for g in reference_geo_rows)
         profile["geo_reference"] = {
             "lat": sum(g["lat"] * g["weight"] for g in reference_geo_rows) / geo_weight,
             "lon": sum(g["lon"] * g["weight"] for g in reference_geo_rows) / geo_weight,
-            "uses_reliable_coordinates": bool(reliable_geo_rows),
+            "coordinate_reference_priority": best_reference_priority,
         }
 
     for col, _, _ in RECOMMENDATION_CRITERIA:
@@ -383,15 +387,10 @@ def cached_candidate_base_metrics(
 
     candidate_wish = pd.DataFrame([make_builder_wish_row(candidate_label, 1, 1)])
 
-    try:
-        hashed = attach_mtb_hashes(candidate_wish, program_mapping, student_id)
-        avail = availability(hashed.iloc[0], candidate_program)
-        chance_if_considered = float(avail.get("availability_probability", np.nan))
-        lottery_rank = int(avail.get("lottery_number", 1))
-    except (KeyError, ValueError, IndexError) as exc:
-        LOGGER.warning("Portfolio-risk estimate unavailable for %s: %s", candidate_label, exc)
-        chance_if_considered = np.nan
-        lottery_rank = np.nan
+    hashed = attach_mtb_hashes(candidate_wish, program_mapping, student_id)
+    avail = availability(hashed.iloc[0], candidate_program)
+    chance_if_considered = float(avail.get("availability_probability", np.nan))
+    lottery_rank = int(avail.get("lottery_number", 1))
 
     out = {
         "chance_if_considered_raw": chance_if_considered,
@@ -599,6 +598,8 @@ def recommend_similar_programs(
         ref_lon = geo_reference.get("lon", np.nan)
 
     rows = []
+    failed_candidates = 0
+    failed_candidate_examples: list[tuple[str, str]] = []
 
     for candidate_label, row in program_mapping.items():
         if candidate_label in selected_programs:
@@ -656,6 +657,7 @@ def recommend_similar_programs(
                 and home_distance_filter_is_reliable(
                     home_geo_reference,
                     coordinate_source,
+                    program,
                 )
             )
             if apply_hard_distance_filter:
@@ -722,12 +724,26 @@ def recommend_similar_programs(
                 "_similarity_fallback_mode": not similarity_signal_available,
                 "_features": candidate_feature_values(program),
             })
-        except Exception:
-            LOGGER.exception("Skipping recommendation candidate after unexpected error: %s", candidate_label)
+        except CandidateEvaluationError as exc:
+            failed_candidates += 1
+            if len(failed_candidate_examples) < 5:
+                failed_candidate_examples.append((candidate_label, str(exc)))
+            LOGGER.warning(
+                "Skipping malformed recommendation candidate %s: %s",
+                candidate_label,
+                exc,
+            )
             continue
 
+    diagnostics = {
+        "failed_candidates": failed_candidates,
+        "failed_candidate_examples": tuple(failed_candidate_examples),
+    }
+
     if not rows:
-        return pd.DataFrame(), profile_table
+        empty = pd.DataFrame()
+        empty.attrs["recommendation_diagnostics"] = diagnostics
+        return empty, profile_table
 
     candidates = pd.DataFrame(rows)
     if diversify:
@@ -742,5 +758,6 @@ def recommend_similar_programs(
             ascending=[False, False, False, False, True],
         ).head(max_recommendations).copy()
 
-    out = out.drop(columns=["_features"], errors="ignore")
-    return out.reset_index(drop=True), profile_table
+    out = out.drop(columns=["_features"], errors="ignore").reset_index(drop=True)
+    out.attrs["recommendation_diagnostics"] = diagnostics
+    return out, profile_table

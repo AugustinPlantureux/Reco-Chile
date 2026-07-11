@@ -56,6 +56,62 @@ class DataSchemaError(ValueError):
     """Raised when an input CSV is readable but structurally unsafe to use."""
 
 
+_REQUIRED_CODE_PATTERN = re.compile(r"^([0-9]+)(?:[.,]0+)?$")
+
+
+def _normalize_required_code_series(
+    values: pd.Series,
+    *,
+    field_name: str,
+    source_name: str,
+) -> pd.Series:
+    """Normalize a required positive-integer identifier or raise a schema error.
+
+    RBD and program codes are identifiers rather than free-form labels. Common
+    spreadsheet exports such as ``123.0``, ``42,00`` and ``="456"`` are
+    accepted only when the decimal part is zero. Empty, non-numeric,
+    fractional, zero and negative values are rejected before they can
+    participate in joins or become program keys.
+
+    Leading zeroes are removed as text rather than through ``int()`` so even an
+    unexpectedly long malformed identifier is handled deterministically and
+    can only produce a ``DataSchemaError``.
+    """
+    normalized: list[str] = []
+    invalid_examples: list[str] = []
+
+    for csv_row, value in enumerate(values.tolist(), start=2):
+        text = "" if pd.isna(value) else str(value).strip()
+
+        if text.startswith('="') and text.endswith('"'):
+            text = text[2:-1].strip()
+
+        match = _REQUIRED_CODE_PATTERN.fullmatch(text)
+        if match is None:
+            invalid_examples.append(f"row {csv_row}: {value!r}")
+            normalized.append("")
+            continue
+
+        digits = match.group(1).lstrip("0")
+        if not digits:
+            invalid_examples.append(f"row {csv_row}: {value!r}")
+            normalized.append("")
+            continue
+
+        normalized.append(digits)
+
+    if invalid_examples:
+        shown = "; ".join(invalid_examples[:5])
+        remaining = len(invalid_examples) - 5
+        suffix = f"; and {remaining} more" if remaining > 0 else ""
+        raise DataSchemaError(
+            f"{source_name} contains invalid {field_name} value(s): {shown}{suffix}. "
+            "Expected a positive integer identifier."
+        )
+
+    return pd.Series(normalized, index=values.index, dtype="object")
+
+
 # ---------------------------------------------------------------------------
 # CSV reading utilities
 # ---------------------------------------------------------------------------
@@ -161,7 +217,11 @@ def _load_rbd_region_map(file_bytes: bytes) -> pd.DataFrame:
         raise DataSchemaError(f"{RBD_REGION_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
     out = df[["rbd", REGION]].copy()
-    out["rbd"] = norm_code(out["rbd"])
+    out["rbd"] = _normalize_required_code_series(
+        out["rbd"],
+        field_name="rbd",
+        source_name=RBD_REGION_PATH.name,
+    )
     out[REGION] = out[REGION].astype(str).str.strip()
     out = _drop_exact_duplicates_or_raise_conflicts(
         out, ["rbd"], source_name=RBD_REGION_PATH.name
@@ -230,8 +290,16 @@ def _load_program_filters(file_bytes: bytes) -> pd.DataFrame:
         raise DataSchemaError(f"{PROGRAM_FILTERS_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
     out = df[list(required)].copy()
-    out["rbd"] = norm_code(out["rbd"])
-    out["program_code"] = norm_code(out["program_code"])
+    out["rbd"] = _normalize_required_code_series(
+        out["rbd"],
+        field_name="rbd",
+        source_name=PROGRAM_FILTERS_PATH.name,
+    )
+    out["program_code"] = _normalize_required_code_series(
+        out["program_code"],
+        field_name="program_code",
+        source_name=PROGRAM_FILTERS_PATH.name,
+    )
     out = _drop_exact_duplicates_or_raise_conflicts(
         out, ["rbd", "program_code"], source_name=PROGRAM_FILTERS_PATH.name
     )
@@ -474,19 +542,23 @@ def translate_filter_value(value, target_column: str, *, default: str = "No info
 
 
 PROGRAM_COORDINATE_SOURCE = "program_coordinate_source"
+PROGRAM_GEO_MATCH_LEVEL = "program_geo_match_level"
+COORDINATE_DISCREPANCY_KM = "coordinate_discrepancy_km"
+RBD_COORDINATE_SPREAD_KM = "rbd_coordinate_spread_km"
 
-# Coordinate columns are evaluated as coherent pairs. The order is also the
-# row-level fallback order: a later pair is used only when no earlier pair has
-# two valid Chilean coordinates for that row.
+# Coordinate columns are evaluated as coherent pairs. Physical school
+# coordinates are preferred to coordinates inherited from a matching step. A
+# later pair is used only when no earlier pair is valid for that row.
 PROGRAM_COORDINATE_COLUMN_PAIRS = [
-    (PROGRAM_LATITUDE, PROGRAM_LONGITUDE, "program coordinate"),
-    ("school_latitude", "school_longitude", "program coordinate"),
-    ("lat_lycee", "lon_lycee", "program coordinate"),
-    ("establecimiento_latitude", "establecimiento_longitude", "program coordinate"),
-    ("latitude", "longitude", "program coordinate"),
-    ("lat", "lon", "program coordinate"),
-    ("lat", "lng", "program coordinate"),
-    ("latitud", "longitud", "program coordinate"),
+    ("school_latitude", "school_longitude", "school coordinate"),
+    ("lat_lycee", "lon_lycee", "school coordinate"),
+    ("establecimiento_latitude", "establecimiento_longitude", "school coordinate"),
+    (PROGRAM_LATITUDE, PROGRAM_LONGITUDE, "matched program coordinate"),
+    ("school_capacity_lat", "school_capacity_lon", "matched program coordinate"),
+    ("latitude", "longitude", "generic coordinate"),
+    ("lat", "lon", "generic coordinate"),
+    ("lat", "lng", "generic coordinate"),
+    ("latitud", "longitud", "generic coordinate"),
     ("commune_latitude", "commune_longitude", "commune coordinate"),
 ]
 
@@ -540,6 +612,91 @@ def _coalesce_program_coordinates(
     return latitudes, longitudes, sources, source_columns
 
 
+def _parse_nonnegative_float(value) -> float:
+    """Parse a non-negative numeric quality metric, otherwise return NaN."""
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        return np.nan
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(parsed) or parsed < 0:
+        return np.nan
+    return parsed
+
+
+def _great_circle_distance_between_points(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    """Return a haversine distance used only for ingestion quality checks."""
+    radius_km = 6371.0
+    lat1, lon1, lat2, lon2 = np.radians(
+        [latitude_a, longitude_a, latitude_b, longitude_b]
+    )
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    )
+    return float(2.0 * radius_km * np.arcsin(np.sqrt(a)))
+
+
+def _rbd_coordinate_spread_km(
+    rbd_values: pd.Series,
+    latitudes: pd.Series,
+    longitudes: pd.Series,
+    coordinate_sources: pd.Series,
+) -> pd.Series:
+    """Return the maximum pairwise school-coordinate distance for each RBD."""
+    spread = pd.Series(np.nan, index=rbd_values.index, dtype=float)
+    valid = (
+        coordinate_sources.eq("school coordinate")
+        & latitudes.notna()
+        & longitudes.notna()
+    )
+    if not valid.any():
+        return spread
+
+    normalized_rbd = norm_code(rbd_values)
+    quality_frame = pd.DataFrame(
+        {
+            "rbd": normalized_rbd,
+            "lat": latitudes,
+            "lon": longitudes,
+        }
+    ).loc[valid]
+
+    for rbd, group in quality_frame.groupby("rbd", sort=False):
+        coordinates = (
+            group[["lat", "lon"]]
+            .dropna()
+            .drop_duplicates()
+            .to_numpy(dtype=float)
+        )
+        group_spread = 0.0
+        for first in range(len(coordinates)):
+            for second in range(first + 1, len(coordinates)):
+                group_spread = max(
+                    group_spread,
+                    _great_circle_distance_between_points(
+                        coordinates[first, 0],
+                        coordinates[first, 1],
+                        coordinates[second, 0],
+                        coordinates[second, 1],
+                    ),
+                )
+        spread.loc[normalized_rbd.eq(rbd)] = group_spread
+
+    return spread
+
+
 @st.cache_data(show_spinner=False)
 def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     df = read_csv(file_bytes, sep="auto")
@@ -558,6 +715,8 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
         "paiement_matricula",
         "paiement_mensualite",
         "orientation_religieuse",
+        PROGRAM_GEO_MATCH_LEVEL,
+        COORDINATE_DISCREPANCY_KM,
     ]
     coordinate_latitudes, coordinate_longitudes, coordinate_sources, coordinate_source_cols = (
         _coalesce_program_coordinates(df)
@@ -568,8 +727,16 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     keep_cols += [c for c in coordinate_source_cols if c not in keep_cols]
 
     out = df[keep_cols].copy()
-    out["rbd"] = norm_code(out["rbd"])
-    out["program_code"] = norm_code(out["program_code"])
+    out["rbd"] = _normalize_required_code_series(
+        out["rbd"],
+        field_name="rbd",
+        source_name=PROGRAM_NAMES_PATH.name,
+    )
+    out["program_code"] = _normalize_required_code_series(
+        out["program_code"],
+        field_name="program_code",
+        source_name=PROGRAM_NAMES_PATH.name,
+    )
     out[PROGRAM_DISPLAY_NAME] = out["nom_programme_reconstruit"].map(compact_program_name)
     out[SCHOOL_NAME] = out["nom_lycee"].map(compact_school_name)
     out[SCHOOL_COMMUNE] = (
@@ -579,6 +746,22 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     out[PROGRAM_LATITUDE] = coordinate_latitudes
     out[PROGRAM_LONGITUDE] = coordinate_longitudes
     out[PROGRAM_COORDINATE_SOURCE] = coordinate_sources
+    out[PROGRAM_GEO_MATCH_LEVEL] = (
+        out[PROGRAM_GEO_MATCH_LEVEL].fillna("").astype(str).str.strip()
+        if PROGRAM_GEO_MATCH_LEVEL in out.columns
+        else ""
+    )
+    out[COORDINATE_DISCREPANCY_KM] = (
+        out[COORDINATE_DISCREPANCY_KM].map(_parse_nonnegative_float)
+        if COORDINATE_DISCREPANCY_KM in out.columns
+        else np.nan
+    )
+    out[RBD_COORDINATE_SPREAD_KM] = _rbd_coordinate_spread_km(
+        out["rbd"],
+        coordinate_latitudes,
+        coordinate_longitudes,
+        coordinate_sources,
+    )
 
     criteria_sources = {
         PROGRAM_RURALITY: "ruralite",
@@ -639,6 +822,13 @@ def attach_program_names(
         out[PROGRAM_COORDINATE_SOURCE] = ""
     else:
         out[PROGRAM_COORDINATE_SOURCE] = out[PROGRAM_COORDINATE_SOURCE].fillna("")
+    if PROGRAM_GEO_MATCH_LEVEL not in out.columns:
+        out[PROGRAM_GEO_MATCH_LEVEL] = ""
+    else:
+        out[PROGRAM_GEO_MATCH_LEVEL] = out[PROGRAM_GEO_MATCH_LEVEL].fillna("")
+    for col in (COORDINATE_DISCREPANCY_KM, RBD_COORDINATE_SPREAD_KM):
+        if col not in out.columns:
+            out[col] = np.nan
 
     for col in [
         PROGRAM_RURALITY,
@@ -687,10 +877,19 @@ def _load_calibration(
             + ", ".join(sorted(missing))
         )
 
-    # Normalize only after the minimum schema is known to be present. This
-    # avoids a raw KeyError for malformed future CSV updates.
-    df["program_code"] = norm_code(df["program_code"])
-    df["rbd"] = norm_code(df["rbd"])
+    # Validate and normalize only after the minimum schema is known to be
+    # present. This avoids a raw KeyError and prevents malformed identifiers
+    # from silently participating in joins.
+    df["rbd"] = _normalize_required_code_series(
+        df["rbd"],
+        field_name="rbd",
+        source_name="Calibration CSV",
+    )
+    df["program_code"] = _normalize_required_code_series(
+        df["program_code"],
+        field_name="program_code",
+        source_name="Calibration CSV",
+    )
     df = _drop_exact_duplicates_or_raise_conflicts(
         df, ["rbd", "program_code"], source_name="Calibration CSV"
     )

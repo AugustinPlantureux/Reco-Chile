@@ -7,17 +7,21 @@ recommendations to the wish list" button.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from sae_app.constants import (
+    APP_DEBUG,
     EQUIV_GROUP,
     HARD_UNMATCHED_THRESHOLD,
     PROGRAM,
     SOFT_UNMATCHED_THRESHOLD,
     WISH_RANK,
 )
+from sae_app.errors import CandidateEvaluationError, MtbEngineError
 from sae_app.geo import (
     geocode_chilean_address,
     geocoding_precision_warning_key,
@@ -42,6 +46,9 @@ from sae_app.recommendations import (
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.ui_common import format_display_table
 from sae_app.wish_list import clean_wish_rows, make_builder_wish_row
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def format_recommendation_display(recommendations: pd.DataFrame, visible_columns: list[str]):
@@ -95,7 +102,7 @@ def render_similar_program_recommendations(
             t("Recommendations combine revealed preferences, proximity, portfolio-risk improvement, and a diversity step to avoid near-duplicates.")
         )
         st.caption(
-            t("Proximity uses program/commune coordinates when available. Regional centroids are only a soft fallback and are never used for hard distance exclusion. To improve precision, add data/commune_coordinates.csv with commune, region, latitude, longitude.")
+            t("Proximity uses school-level coordinates when available. Commune and regional coordinates are only soft fallbacks and are never used for hard distance exclusion. To improve precision, add data/commune_coordinates.csv with commune, region, latitude, longitude.")
         )
 
         st.markdown(t("#### Portfolio-risk optimization"))
@@ -178,7 +185,22 @@ def render_similar_program_recommendations(
                         )
                     )
             elif normalized_current_address:
-                st.warning(t("Address could not be geocoded: {error}", error=stored_geo.get("error", "")))
+                error_key = str(stored_geo.get("error_key", "")).strip()
+                error_kwargs = stored_geo.get("error_kwargs", {})
+                if not isinstance(error_kwargs, dict):
+                    error_kwargs = {}
+
+                # Backward-compatible fallback for a result already stored in
+                # session state before language-neutral geocoding errors were
+                # introduced.
+                error_text = (
+                    t(error_key, **error_kwargs)
+                    if error_key
+                    else str(stored_geo.get("error", ""))
+                )
+                st.warning(
+                    t("Address could not be geocoded: {error}", error=error_text)
+                )
         elif normalized_current_address and stored_geo:
             st.info(t("Address changed. Click the button to update the coordinates."))
 
@@ -190,7 +212,7 @@ def render_similar_program_recommendations(
             if hard_home_distance_filter_available:
                 st.caption(
                     t(
-                        "The {max_distance:.0f} km straight-line limit is applied only when the program has reliable school/commune coordinates. Regional approximations are never used for hard exclusion.",
+                        "The {max_distance:.0f} km straight-line limit is applied only when the program has reliable school-level coordinates. Commune and regional approximations are never used for hard exclusion.",
                         max_distance=RECOMMENDATION_MAX_HOME_DISTANCE_KM,
                     )
                 )
@@ -224,27 +246,81 @@ def render_similar_program_recommendations(
         diversify = RECOMMENDATION_DIVERSIFY
         diversity_strength = RECOMMENDATION_DIVERSITY_STRENGTH if diversify else 0.0
 
-        recommendations, _profile_table = recommend_similar_programs(
-            edited,
-            program_mapping,
-            student_id=student_id,
-            current_unmatched_risk=current_unmatched_risk,
-            max_recommendations=rec_max,
-            rank_sensitive=True,
-            competition_weight=competition_weight,
-            hard_constraint_cols=hard_constraint_cols,
-            proximity_weight=proximity_weight,
-            distance_scale_km=float(distance_scale_km),
-            home_geo_reference=home_geo_reference,
-            max_home_distance_km=RECOMMENDATION_MAX_HOME_DISTANCE_KM if home_geo_reference else None,
-            risk_optimization_weight=risk_optimization_weight,
-            min_similarity_score=RECOMMENDATION_MIN_SIMILARITY_SCORE,
-            diversify=diversify,
-            diversity_strength=diversity_strength,
+        try:
+            recommendations, _profile_table = recommend_similar_programs(
+                edited,
+                program_mapping,
+                student_id=student_id,
+                current_unmatched_risk=current_unmatched_risk,
+                max_recommendations=rec_max,
+                rank_sensitive=True,
+                competition_weight=competition_weight,
+                hard_constraint_cols=hard_constraint_cols,
+                proximity_weight=proximity_weight,
+                distance_scale_km=float(distance_scale_km),
+                home_geo_reference=home_geo_reference,
+                max_home_distance_km=(
+                    RECOMMENDATION_MAX_HOME_DISTANCE_KM
+                    if home_geo_reference
+                    else None
+                ),
+                risk_optimization_weight=risk_optimization_weight,
+                min_similarity_score=RECOMMENDATION_MIN_SIMILARITY_SCORE,
+                diversify=diversify,
+                diversity_strength=diversity_strength,
+            )
+        except MtbEngineError as exc:
+            LOGGER.warning("Expected recommendation-engine error: %s", exc)
+            st.error(t(exc.message_key, **exc.message_kwargs))
+            if APP_DEBUG:
+                st.exception(exc)
+            return
+        except CandidateEvaluationError as exc:
+            LOGGER.warning(
+                "Recommendation calculation stopped because of malformed data: %s",
+                exc,
+            )
+            st.error(
+                t(
+                    "Recommendations could not be computed because some program data are invalid."
+                )
+            )
+            if APP_DEBUG:
+                st.exception(exc)
+            return
+        except Exception as exc:
+            LOGGER.exception("Unexpected recommendation calculation error")
+            st.error(
+                t(
+                    "Recommendations could not be computed because of an unexpected internal error."
+                )
+            )
+            if APP_DEBUG:
+                st.exception(exc)
+            return
+
+        recommendation_diagnostics = recommendations.attrs.get(
+            "recommendation_diagnostics",
+            {},
+        )
+        failed_candidates = int(
+            recommendation_diagnostics.get("failed_candidates", 0) or 0
         )
 
         if recommendations.empty:
-            if hard_home_distance_filter_available:
+            if failed_candidates:
+                st.warning(
+                    t(
+                        "Some programs could not be evaluated because of invalid source data, and no recommendation was produced."
+                    )
+                )
+                if APP_DEBUG:
+                    for candidate_label, error in recommendation_diagnostics.get(
+                        "failed_candidate_examples",
+                        (),
+                    ):
+                        st.caption(f"{candidate_label}: {error}")
+            elif hard_home_distance_filter_available:
                 st.warning(
                     t(
                         "No recommended program matched the current scoring and reliable straight-line distance rules. You can still add programs manually."
@@ -255,6 +331,13 @@ def render_similar_program_recommendations(
                     t("No similar program was found under the current proximity/scoring rules.")
                 )
             return
+
+        if APP_DEBUG and failed_candidates:
+            for candidate_label, error in recommendation_diagnostics.get(
+                "failed_candidate_examples",
+                (),
+            ):
+                st.caption(f"Skipped candidate — {candidate_label}: {error}")
 
         if (
             "_similarity_fallback_mode" in recommendations.columns

@@ -32,6 +32,15 @@ class InvalidWishImportRow:
 
 
 @dataclass(frozen=True)
+class InvalidEquivalenceGroupImportRow:
+    """One imported equivalence group replaced by the row's valid wish rank."""
+
+    csv_row: int
+    group_value: str
+    fallback_rank: int
+
+
+@dataclass(frozen=True)
 class WishImportReport:
     """Structured diagnostics for a wish-list CSV import."""
 
@@ -40,11 +49,20 @@ class WishImportReport:
     unknown_programs: tuple[str, ...] = ()
     duplicate_programs: tuple[str, ...] = ()
     invalid_rows: tuple[InvalidWishImportRow, ...] = ()
+    invalid_equivalence_groups: tuple[InvalidEquivalenceGroupImportRow, ...] = ()
     uses_stable_ids: bool = False
 
     @property
-    def has_issues(self) -> bool:
+    def has_rejected_rows(self) -> bool:
         return bool(self.unknown_programs or self.duplicate_programs or self.invalid_rows)
+
+    @property
+    def has_corrections(self) -> bool:
+        return bool(self.invalid_equivalence_groups)
+
+    @property
+    def has_issues(self) -> bool:
+        return self.has_rejected_rows or self.has_corrections
 
 
 @dataclass(frozen=True)
@@ -269,15 +287,24 @@ def parse_wishes_with_report(
             break
     if group_source is not None:
         numeric_groups = pd.to_numeric(group_source, errors="coerce")
+        raw_group_values = group_source.fillna("").astype(str).str.strip()
+        explicit_group_mask = raw_group_values.ne("")
         valid_group_mask = (
             numeric_groups.notna()
             & np.isfinite(numeric_groups)
             & numeric_groups.ge(1)
             & numeric_groups.mod(1).eq(0)
         )
+        invalid_group_mask = explicit_group_mask & ~valid_group_mask
         out[EQUIV_GROUP] = numeric_groups.where(valid_group_mask, numeric_ranks)
+        out["_raw_group"] = raw_group_values
+        out["_invalid_group"] = invalid_group_mask
     else:
         out[EQUIV_GROUP] = numeric_ranks
+        out["_raw_group"] = ""
+        out["_invalid_group"] = False
+
+    out["_csv_row"] = np.arange(len(df)) + 2
 
     out[LOTTERY] = 1
     for col in PRIORITIES + [SAFETY]:
@@ -296,8 +323,20 @@ def parse_wishes_with_report(
     duplicate_programs = _ordered_unique(valid.loc[duplicate_mask, PROGRAM].tolist())
     valid = valid.loc[~duplicate_mask].copy()
 
+    invalid_equivalence_groups = tuple(
+        InvalidEquivalenceGroupImportRow(
+            csv_row=int(row["_csv_row"]),
+            group_value=str(row["_raw_group"]),
+            fallback_rank=int(row[WISH_RANK]),
+        )
+        for _, row in valid.loc[valid["_invalid_group"].fillna(False)].iterrows()
+    )
+
     rows_imported = int(len(valid))
-    valid = valid.drop(columns=["_raw_program"], errors="ignore").reset_index(drop=True)
+    valid = valid.drop(
+        columns=["_raw_program", "_raw_group", "_invalid_group", "_csv_row"],
+        errors="ignore",
+    ).reset_index(drop=True)
     wishes = valid if not valid.empty else empty_wishes()
 
     return WishImportResult(
@@ -308,6 +347,7 @@ def parse_wishes_with_report(
             unknown_programs=unknown_programs,
             duplicate_programs=duplicate_programs,
             invalid_rows=invalid_rows,
+            invalid_equivalence_groups=invalid_equivalence_groups,
             uses_stable_ids=uses_stable_ids,
         ),
     )

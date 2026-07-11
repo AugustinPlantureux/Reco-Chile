@@ -37,8 +37,51 @@ from sae_app.constants import (
     UNKNOWN_REGION,
     UNKNOWN_SCHOOL_NAME,
 )
-from sae_app.data_loading import program_matches_filters, region_sort_index
-from sae_app.text_utils import as_float, clean_recommendation_value, clean_text, parse_coordinate, series_value
+from sae_app.data_loading import (
+    COORDINATE_DISCREPANCY_KM,
+    PROGRAM_COORDINATE_SOURCE,
+    PROGRAM_GEO_MATCH_LEVEL,
+    RBD_COORDINATE_SPREAD_KM,
+    program_matches_filters,
+    region_sort_index,
+)
+from sae_app.errors import CandidateEvaluationError
+from sae_app.text_utils import clean_recommendation_value, clean_text, parse_coordinate, series_value
+
+
+def _optional_nonnegative_metric(value) -> float:
+    """Parse an optional non-negative quality metric, otherwise return NaN."""
+    if pd.isna(value):
+        return np.nan
+    try:
+        parsed = float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(parsed) or parsed < 0:
+        return np.nan
+    return parsed
+
+
+def _required_nonnegative_candidate_number(
+    row: pd.Series,
+    column: str,
+    *,
+    label: str,
+) -> float:
+    """Read one required candidate number without silently coercing bad data."""
+    raw_value = series_value(row, column, np.nan)
+    try:
+        value = float(str(raw_value).strip().replace(",", "."))
+    except (TypeError, ValueError) as exc:
+        raise CandidateEvaluationError(
+            f"{label or '<unknown program>'}: invalid {column} value {raw_value!r}."
+        ) from exc
+
+    if not np.isfinite(value) or value < 0:
+        raise CandidateEvaluationError(
+            f"{label or '<unknown program>'}: {column} must be finite and non-negative."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -70,16 +113,30 @@ class ProgramRecord:
     program_religious_orientation: str
     program_latitude: float
     program_longitude: float
+    program_coordinate_source: str
+    program_geo_match_level: str
+    coordinate_discrepancy_km: float
+    rbd_coordinate_spread_km: float
     capacity: float
     true_applicants: float
 
     @classmethod
     def from_series(cls, row: pd.Series, *, label: str = "") -> "ProgramRecord":
+        rbd = str(series_value(row, "rbd", "")).strip()
+        program_code = str(series_value(row, "program_code", "")).strip()
+        if not rbd or not program_code:
+            raise CandidateEvaluationError(
+                f"{label or '<unknown program>'}: missing rbd or program_code."
+            )
+
+        capacity = _required_nonnegative_candidate_number(row, CAPACITY, label=label)
+        true_applicants = _required_nonnegative_candidate_number(row, TRUE_APP, label=label)
+
         return cls(
             label=str(label),
             raw=row,
-            rbd=str(series_value(row, "rbd", "")).strip(),
-            program_code=str(series_value(row, "program_code", "")).strip(),
+            rbd=rbd,
+            program_code=program_code,
             region=clean_text(series_value(row, REGION, UNKNOWN_REGION), default=UNKNOWN_REGION),
             school_name=clean_text(series_value(row, SCHOOL_NAME, "")),
             school_commune=clean_text(series_value(row, SCHOOL_COMMUNE, "")),
@@ -97,8 +154,20 @@ class ProgramRecord:
             program_religious_orientation=clean_text(series_value(row, PROGRAM_RELIGIOUS_ORIENTATION, "")),
             program_latitude=parse_coordinate(series_value(row, PROGRAM_LATITUDE, np.nan)),
             program_longitude=parse_coordinate(series_value(row, PROGRAM_LONGITUDE, np.nan)),
-            capacity=as_float(series_value(row, CAPACITY, 0), 0.0),
-            true_applicants=as_float(series_value(row, TRUE_APP, 0), 0.0),
+            program_coordinate_source=clean_text(
+                series_value(row, PROGRAM_COORDINATE_SOURCE, "")
+            ),
+            program_geo_match_level=clean_text(
+                series_value(row, PROGRAM_GEO_MATCH_LEVEL, "")
+            ),
+            coordinate_discrepancy_km=_optional_nonnegative_metric(
+                series_value(row, COORDINATE_DISCREPANCY_KM, np.nan)
+            ),
+            rbd_coordinate_spread_km=_optional_nonnegative_metric(
+                series_value(row, RBD_COORDINATE_SPREAD_KM, np.nan)
+            ),
+            capacity=capacity,
+            true_applicants=true_applicants,
         )
 
     def criterion_value(self, col: str) -> str:

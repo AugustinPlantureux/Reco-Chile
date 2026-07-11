@@ -26,3 +26,10 @@ class UnknownProgram(MtbEngineError):
 
 class EmptyWishList(MtbEngineError):
     """Raised when a calculation receives no valid wishes."""
+
+
+class CandidateEvaluationError(ValueError):
+    """Raised when one recommendation candidate has malformed row data.
+
+    Unexpected programming errors must not be wrapped in this exception.
+    """

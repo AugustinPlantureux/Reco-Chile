@@ -30,8 +30,7 @@ from sae_app.constants import (
     REGION,
     REGION_CENTROIDS,
 )
-from sae_app.data_loading import PROGRAM_COORDINATE_SOURCE, first_existing_column, read_csv
-from sae_app.i18n import t
+from sae_app.data_loading import first_existing_column, read_csv
 from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import normalize_geo_key, parse_coordinate
 
@@ -143,15 +142,63 @@ def _commune_coordinate_lookup(
     }
 
 
-RELIABLE_PROGRAM_COORDINATE_SOURCES = frozenset({
-    "program coordinate",
-    "commune coordinate",
+STRONG_PROGRAM_GEO_MATCH_LEVELS = frozenset({
+    "exact_rbd_program_code",
+    "exact_rbd",
+    "exact",
 })
+MAX_MATCHED_COORDINATE_DISCREPANCY_KM = 5.0
+MAX_RBD_SCHOOL_COORDINATE_SPREAD_KM = 10.0
 RELIABLE_HOME_GEOCODING_PRECISIONS = frozenset({"address", "street"})
 
 
-def program_coordinate_source_is_reliable(source: str) -> bool:
-    return str(source or "").strip() in RELIABLE_PROGRAM_COORDINATE_SOURCES
+def program_coordinate_source_is_reliable(
+    source: str,
+    program: ProgramRecord | None = None,
+) -> bool:
+    """Return whether a coordinate is precise enough for hard exclusion.
+
+    Generic, commune and regional coordinates remain useful for continuous
+    proximity scoring, but never remove a program from the family-facing list.
+    """
+    source = str(source or "").strip()
+    if program is None:
+        return False
+
+    if source == "school coordinate":
+        spread = program.rbd_coordinate_spread_km
+        return (
+            np.isfinite(spread)
+            and float(spread) <= MAX_RBD_SCHOOL_COORDINATE_SPREAD_KM
+        )
+
+    if source == "matched program coordinate":
+        discrepancy = program.coordinate_discrepancy_km
+        match_level = str(program.program_geo_match_level or "").strip().lower()
+        spread = program.rbd_coordinate_spread_km
+        spread_is_acceptable = (
+            not np.isfinite(spread)
+            or float(spread) <= MAX_RBD_SCHOOL_COORDINATE_SPREAD_KM
+        )
+        return (
+            np.isfinite(discrepancy)
+            and float(discrepancy) <= MAX_MATCHED_COORDINATE_DISCREPANCY_KM
+            and match_level in STRONG_PROGRAM_GEO_MATCH_LEVELS
+            and spread_is_acceptable
+        )
+
+    return False
+
+
+def program_coordinate_reference_priority(source: str) -> int:
+    """Rank coordinate sources for building the wish-list geographic reference."""
+    return {
+        "school coordinate": 4,
+        "matched program coordinate": 3,
+        "commune coordinate": 2,
+        "generic coordinate": 1,
+        "region approximation": 0,
+    }.get(str(source or "").strip(), 0)
 
 
 def home_geocoding_supports_hard_filter(home_geo_reference: dict | None) -> bool:
@@ -162,10 +209,14 @@ def home_geocoding_supports_hard_filter(home_geo_reference: dict | None) -> bool
 def home_distance_filter_is_reliable(
     home_geo_reference: dict | None,
     program_coordinate_source: str,
+    program: ProgramRecord | None = None,
 ) -> bool:
     return (
         home_geocoding_supports_hard_filter(home_geo_reference)
-        and program_coordinate_source_is_reliable(program_coordinate_source)
+        and program_coordinate_source_is_reliable(
+            program_coordinate_source,
+            program,
+        )
     )
 
 
@@ -181,9 +232,7 @@ def program_coordinates(
     3. approximate region centroid.
     """
     if valid_lat_lon(program.program_latitude, program.program_longitude):
-        source = str(program.raw.get(PROGRAM_COORDINATE_SOURCE, "")).strip()
-        if source not in RELIABLE_PROGRAM_COORDINATE_SOURCES:
-            source = "program coordinate"
+        source = str(program.program_coordinate_source or "generic coordinate").strip()
         return float(program.program_latitude), float(program.program_longitude), source
 
     commune = normalize_geo_key(program.school_commune)
@@ -614,6 +663,21 @@ def geocoding_precision_warning_key(geo_result: dict) -> str:
     )
 
 
+def _geocoding_error(address: str, error_key: str, **error_kwargs) -> dict:
+    """Return a cache-safe, language-neutral geocoding error payload.
+
+    Translation belongs to the UI layer. Keeping only the translation key and
+    formatting arguments in the cached result prevents one session's language
+    from leaking into another session through Streamlit's shared data cache.
+    """
+    return {
+        "ok": False,
+        "address": address,
+        "error_key": error_key,
+        "error_kwargs": dict(error_kwargs),
+    }
+
+
 @st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
 def geocode_chilean_address(address: str) -> dict:
     """Geocode a family-entered address using OpenStreetMap/Nominatim.
@@ -628,7 +692,7 @@ def geocode_chilean_address(address: str) -> dict:
     original_address = " ".join(str(address or "").strip().split())
     query = normalize_address_for_geocoding(original_address)
     if not query:
-        return {"ok": False, "address": original_address, "error": t("No address entered.")}
+        return _geocoding_error(original_address, "No address entered.")
 
     params = urllib.parse.urlencode({
         "q": query,
@@ -653,40 +717,39 @@ def geocode_chilean_address(address: str) -> dict:
         with urllib.request.urlopen(request, timeout=GEOCODING_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", 200)
             if status != 200:
-                return {
-                    "ok": False,
-                    "address": original_address,
-                    "error": t("Geocoding service returned status {status}.", status=status),
-                }
+                return _geocoding_error(
+                    original_address,
+                    "Geocoding service returned status {status}.",
+                    status=status,
+                )
             payload = response.read().decode("utf-8")
     except urllib.error.URLError as exc:
-        return {
-            "ok": False,
-            "address": original_address,
-            "error": t("Could not reach the geocoding service: {error}", error=str(exc)),
-        }
+        return _geocoding_error(
+            original_address,
+            "Could not reach the geocoding service: {error}",
+            error=str(exc),
+        )
     except Exception as exc:
-        return {
-            "ok": False,
-            "address": original_address,
-            "error": t("Could not reach the geocoding service: {error}", error=str(exc)),
-        }
+        return _geocoding_error(
+            original_address,
+            "Could not reach the geocoding service: {error}",
+            error=str(exc),
+        )
 
     try:
         results = json.loads(payload)
     except Exception as exc:
-        return {
-            "ok": False,
-            "address": original_address,
-            "error": t("Could not read the geocoding response: {error}", error=str(exc)),
-        }
+        return _geocoding_error(
+            original_address,
+            "Could not read the geocoding response: {error}",
+            error=str(exc),
+        )
 
     if not results:
-        return {
-            "ok": False,
-            "address": original_address,
-            "error": t("No result found for this address in Chile."),
-        }
+        return _geocoding_error(
+            original_address,
+            "No result found for this address in Chile.",
+        )
 
     scored_results = []
 
@@ -707,11 +770,10 @@ def geocode_chilean_address(address: str) -> dict:
         })
 
     if not scored_results:
-        return {
-            "ok": False,
-            "address": original_address,
-            "error": t("The geocoded result is outside Chile or has invalid coordinates."),
-        }
+        return _geocoding_error(
+            original_address,
+            "The geocoded result is outside Chile or has invalid coordinates.",
+        )
 
     best = max(scored_results, key=lambda item: (item["score"], -item["rank"]))
     best_result = best["result"]

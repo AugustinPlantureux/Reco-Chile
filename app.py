@@ -407,12 +407,13 @@ if uploaded_ignored_lottery_cols:
 if uploaded_wish_report is not None:
     st.caption(
         t(
-            "CSV import summary: {read} row(s) read, {imported} imported, {unknown} unknown program(s), {duplicates} duplicate(s), {invalid} invalid row(s).",
+            "CSV import summary: {read} row(s) read, {imported} imported, {unknown} unknown program(s), {duplicates} duplicate(s), {invalid} invalid rank(s), {invalid_groups} invalid equivalence group(s).",
             read=uploaded_wish_report.rows_read,
             imported=uploaded_wish_report.rows_imported,
             unknown=len(uploaded_wish_report.unknown_programs),
             duplicates=len(uploaded_wish_report.duplicate_programs),
             invalid=len(uploaded_wish_report.invalid_rows),
+            invalid_groups=len(uploaded_wish_report.invalid_equivalence_groups),
         )
     )
 
@@ -426,7 +427,7 @@ if uploaded_wish_report is not None:
     if uploaded_wish_report.has_issues:
         st.warning(
             t(
-                "Some CSV rows could not be imported. Review the details below before importing the valid rows."
+                "Some CSV rows were skipped or automatically corrected. Review the details before importing."
             )
         )
         if uploaded_wish_report.unknown_programs:
@@ -453,6 +454,22 @@ if uploaded_wish_report is not None:
                 for item in uploaded_wish_report.invalid_rows
             )
             st.write(t("Invalid rows: {rows}", rows=invalid_row_details))
+        if uploaded_wish_report.invalid_equivalence_groups:
+            invalid_group_details = "; ".join(
+                t(
+                    "CSV row {row}: invalid equivalence group '{value}'; wish rank {rank} was used instead",
+                    row=item.csv_row,
+                    value=item.group_value,
+                    rank=item.fallback_rank,
+                )
+                for item in uploaded_wish_report.invalid_equivalence_groups
+            )
+            st.write(
+                t(
+                    "Invalid equivalence groups: {groups}",
+                    groups=invalid_group_details,
+                )
+            )
 
 if uploaded_wish_rows is not None and uploaded_wish_hash:
     already_imported = st.session_state.get(editor_import_hash_key) == uploaded_wish_hash
@@ -473,7 +490,7 @@ if uploaded_wish_rows is not None and uploaded_wish_hash:
         st.success(t("Wish list imported with {n} wish(es).", n=len(uploaded_non_empty_wishes)))
     elif not already_imported:
         if current_non_empty_wishes.empty:
-            button_label = t("Import valid rows only")
+            button_label = t("Import available rows with the indicated corrections")
         else:
             st.warning(
                 t(
@@ -481,7 +498,7 @@ if uploaded_wish_rows is not None and uploaded_wish_hash:
                 )
             )
             button_label = (
-                t("Replace current wish list with valid imported rows")
+                t("Replace current wish list with imported rows and indicated corrections")
                 if import_has_issues
                 else t("Replace current wish list with uploaded CSV")
             )
