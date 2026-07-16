@@ -119,6 +119,12 @@ class ProgramSummary(BaseModel):
     true_applicants_last_year: int
 
 
+class ProgramListResponse(BaseModel):
+    items: list[ProgramSummary]
+    total_matched: int
+    truncated: bool
+
+
 class WishItem(BaseModel):
     program_id: str
     equivalence_group: int | None = Field(
@@ -188,17 +194,18 @@ def get_regions() -> list[str]:
     return available_regions(STATE["calib"])
 
 
-@app.get("/programs", response_model=list[ProgramSummary])
+@app.get("/programs", response_model=ProgramListResponse)
 def get_programs(
     region: str | None = Query(None, description="Exact region name, as returned by /regions"),
     q: str | None = Query(None, description="Free-text search over school name, commune, and program name"),
     limit: int = Query(200, ge=1, le=1000),
-) -> list[ProgramSummary]:
+) -> ProgramListResponse:
     program_mapping = STATE["program_mapping"]
     label_to_id = STATE["label_to_id"]
     needle = q.strip().lower() if q else None
 
-    results: list[ProgramSummary] = []
+    items: list[ProgramSummary] = []
+    total_matched = 0
     for label, row in program_mapping.items():
         if region and str(row.get(REGION, "")).strip() != region:
             continue
@@ -212,20 +219,26 @@ def get_programs(
             if needle not in haystack:
                 continue
 
-        results.append(ProgramSummary(
-            program_id=label_to_id[label],
-            school_name=school_name,
-            school_commune=school_commune,
-            region=str(row.get(REGION, "")).strip(),
-            program_display_name=program_display_name,
-            program_track=str(row.get(PROGRAM_TRACK, "")).strip(),
-            capacity=int(row.get(CAPACITY, 0) or 0),
-            true_applicants_last_year=int(row.get(TRUE_APP, 0) or 0),
-        ))
-        if len(results) >= limit:
-            break
+        # Count every match, not just the ones kept, so the response can tell
+        # the caller whether `limit` cut off real results.
+        total_matched += 1
+        if len(items) < limit:
+            items.append(ProgramSummary(
+                program_id=label_to_id[label],
+                school_name=school_name,
+                school_commune=school_commune,
+                region=str(row.get(REGION, "")).strip(),
+                program_display_name=program_display_name,
+                program_track=str(row.get(PROGRAM_TRACK, "")).strip(),
+                capacity=int(row.get(CAPACITY, 0) or 0),
+                true_applicants_last_year=int(row.get(TRUE_APP, 0) or 0),
+            ))
 
-    return results
+    return ProgramListResponse(
+        items=items,
+        total_matched=total_matched,
+        truncated=total_matched > len(items),
+    )
 
 
 @app.post("/simulate", response_model=SimulationResponse)
@@ -240,7 +253,18 @@ def simulate(payload: SimulationRequest) -> SimulationResponse:
     label_to_id = STATE["label_to_id"]
 
     rows = []
+    seen_program_ids: set[str] = set()
     for rank, wish in enumerate(payload.wishes, start=1):
+        if wish.program_id in seen_program_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=_error_detail(
+                    "duplicate_program_id",
+                    f"program_id {wish.program_id} appears more than once in wishes.",
+                ),
+            )
+        seen_program_ids.add(wish.program_id)
+
         label = id_to_label.get(wish.program_id)
         if label is None:
             raise HTTPException(
@@ -289,6 +313,7 @@ def simulate(payload: SimulationRequest) -> SimulationResponse:
 
         variants: list[SimulationVariant] = []
         reference_choices = None
+        reference_outcome = reference_p_unmatched = reference_at_risk = None
 
         for idx, strict_order in enumerate(iter_equivalence_orders(reference_order), start=1):
             choices = compute_equivalence_order_from_precomputed(strict_order, availability_lookup)
@@ -296,6 +321,7 @@ def simulate(payload: SimulationRequest) -> SimulationResponse:
 
             if idx == 1:
                 reference_choices = choices
+                reference_outcome, reference_p_unmatched, reference_at_risk = outcome, p_unmatched, at_risk
 
             variants.append(SimulationVariant(
                 order_index=idx,
@@ -308,10 +334,6 @@ def simulate(payload: SimulationRequest) -> SimulationResponse:
             ))
     except MtbEngineError as exc:
         raise _engine_error(exc) from exc
-
-    reference_outcome, reference_p_unmatched, reference_at_risk = predicted_outcome_from_choices(
-        reference_choices, HARD_UNMATCHED_THRESHOLD
-    )
 
     equivalence_sensitivity = None
     if total_orders > 1:
