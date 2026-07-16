@@ -306,7 +306,7 @@ def render_simulation_result(result: dict) -> None:
             and predicted_chance_range >= EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD
         )
 
-        if len(distinct_outcomes) == 1 and same_outcome_but_probability_changes:
+        if same_outcome_but_probability_changes:
             st.warning(
                 t(
                     "The strict ordering inside the equivalence classes does not change the most likely school: **{outcome}**. However, it changes the final assignment probability for that school, from {min_chance:.1%} to {max_chance:.1%} across compatible strict order(s).",

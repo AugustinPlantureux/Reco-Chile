@@ -353,11 +353,6 @@ def parse_wishes_with_report(
     )
 
 
-def parse_wishes(file_bytes: bytes, mapping: dict[str, pd.Series]) -> pd.DataFrame:
-    """Backward-compatible wrapper returning only the parsed wish rows."""
-    return parse_wishes_with_report(file_bytes, mapping).wishes
-
-
 def uploaded_lottery_columns(file_bytes: bytes) -> list[str]:
     """Return user-supplied lottery columns that will be ignored in MTB mode."""
     try:
@@ -397,6 +392,38 @@ def make_builder_wish_row(program_label: str, wish_rank: int, preference_group: 
     for col in PRIORITIES + [SAFETY]:
         row[col] = False
     return row
+
+
+def make_appended_recommendation_rows(
+    program_labels: list[str],
+    *,
+    next_rank: int,
+    next_group: int,
+    use_equivalence_classes: bool,
+) -> list[dict]:
+    """Build appended recommendation rows without creating implicit ties.
+
+    A grouped multiselect is not an explicit statement that several programs
+    are equally preferred. Each appended recommendation therefore receives its
+    own preference group in equivalence-class mode, while preserving the
+    recommendation order supplied by the caller.
+    """
+    rows: list[dict] = []
+    for offset, program_label in enumerate(program_labels):
+        wish_rank = int(next_rank) + offset
+        preference_group = (
+            int(next_group) + offset
+            if use_equivalence_classes
+            else wish_rank
+        )
+        rows.append(
+            make_builder_wish_row(
+                program_label,
+                wish_rank,
+                preference_group,
+            )
+        )
+    return rows
 
 
 def normalize_builder_wishes(

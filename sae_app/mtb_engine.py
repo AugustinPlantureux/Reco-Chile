@@ -223,8 +223,6 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
     # SHA-256 gives a percentile, which is converted into an equivalent
     # lottery rank inside the program-level reference population N_s.
     population = max(round(as_float(program[POP])), 1)
-    pop_label  = POP
-
     lottery  = max(round(as_float(wish.get(LOTTERY, 1), 1)), 1)
     raw_rank = min(lottery, population)
 
@@ -263,7 +261,6 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
         "capacity":                         capacity,
         "true_applicants_last_year":        true_app,
         "lottery_population_used":          population,
-        "lottery_population_source":        pop_label,
         "raw_lottery_rank":                 raw_rank,
         "lottery_percentile_used":          percentile,
         "priority_effective_percentile":    eff_pct,

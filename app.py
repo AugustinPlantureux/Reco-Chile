@@ -56,7 +56,7 @@ from sae_app.mtb_engine import (
     compute_equivalence_order_from_precomputed,
     precompute_equivalence_availability,
 )
-from sae_app.program_options import build_options, compact_program_label, filter_program_options
+from sae_app.program_options import build_program_mapping, compact_program_label, filter_program_options
 from sae_app.recommendations import clear_candidate_risk_cache
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.text_utils import as_bool
@@ -176,7 +176,7 @@ if cumulative_share_errors:
     st.code("\n".join(cumulative_share_errors[:10]))
     st.stop()
 
-program_options, program_mapping = build_options(calib)
+program_mapping = build_program_mapping(calib)
 
 # ── Section 1: pathway ───────────────────────────────────────────────
 st.subheader(t("1. Start with the student's preferences"))

@@ -45,7 +45,7 @@ from sae_app.recommendations import (
 )
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.ui_common import format_display_table
-from sae_app.wish_list import clean_wish_rows, make_builder_wish_row
+from sae_app.wish_list import clean_wish_rows, make_appended_recommendation_rows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -405,9 +405,16 @@ def render_similar_program_recommendations(
             non_empty = non_empty[non_empty[PROGRAM] != ""].copy()
 
             existing = set(non_empty[PROGRAM].tolist())
-            new_programs = [p for p in programs_to_add if p not in existing]
+            selected_programs = set(programs_to_add)
 
-            rows_to_add = []
+            # Preserve the recommendation ranking. A multiselect records which
+            # programs were selected, not an explicit preference order.
+            new_programs = [
+                program_label
+                for program_label in recommendations[PROGRAM].tolist()
+                if program_label in selected_programs and program_label not in existing
+            ]
+
             if len(non_empty) > 0:
                 existing_ranks = pd.to_numeric(
                     non_empty.get(WISH_RANK, pd.Series(dtype=float)),
@@ -424,19 +431,12 @@ def render_similar_program_recommendations(
                 next_rank = 1
                 next_group = 1
 
-            for i, program_label in enumerate(new_programs):
-                if use_equivalence_classes:
-                    # In equivalence-class mode, recommended programs are appended to
-                    # the next preference group, not to the next strict row number.
-                    wish_rank_value = next_rank + i
-                    equivalence_group_value = next_group
-                else:
-                    wish_rank_value = next_rank + i
-                    equivalence_group_value = next_rank + i
-
-                rows_to_add.append(
-                    make_builder_wish_row(program_label, wish_rank_value, equivalence_group_value)
-                )
+            rows_to_add = make_appended_recommendation_rows(
+                new_programs,
+                next_rank=next_rank,
+                next_group=next_group,
+                use_equivalence_classes=use_equivalence_classes,
+            )
 
             if rows_to_add:
                 updated_wishes = pd.concat(

@@ -35,20 +35,6 @@ from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import normalize_geo_key, parse_coordinate
 
 
-def load_commune_coordinates() -> pd.DataFrame:
-    """Load commune coordinates, caching by the file's actual contents."""
-    if not COMMUNE_COORDINATES_PATH.exists():
-        return pd.DataFrame(
-            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
-        )
-    file_bytes = COMMUNE_COORDINATES_PATH.read_bytes()
-    if not file_bytes.strip():
-        return pd.DataFrame(
-            columns=["commune_key", "region_key", PROGRAM_LATITUDE, PROGRAM_LONGITUDE]
-        )
-    return _load_commune_coordinates(file_bytes)
-
-
 @st.cache_data(show_spinner=False)
 def _load_commune_coordinates(file_bytes: bytes) -> pd.DataFrame:
     """Parse optional commune coordinates using one coherent coordinate pair."""
