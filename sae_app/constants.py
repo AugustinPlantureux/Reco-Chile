@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Set to True during local development to display full Python tracebacks.
+APP_DEBUG = False
+
 # ---------------------------------------------------------------------------
 # Data columns
 # ---------------------------------------------------------------------------
@@ -15,8 +18,6 @@ WISH_RANK    = "wish_rank"
 PROGRAM      = "program"
 EQUIV_GROUP  = "preference_group"
 LOTTERY      = "lottery_number"
-HASH_INPUT   = "lottery_hash_input"
-HASH_HEX     = "lottery_hash_hex"
 HASH_PCT     = "lottery_hash_percentile"
 
 CAPACITY     = "total_admission_seats"
@@ -25,7 +26,7 @@ POP          = "program_lottery_population_2024"
 IMPUTED      = "calibration_2024_imputed"
 IMPUT_METHOD = "calibration_2024_imputation_method"
 
-PRIORITY_STUDENT_QUOTA = 0.15   # 15% reserved for priority students
+PRIORITY_STUDENT_SEATS = "priority_student_seats"
 
 # Hard-coded unmatched-risk thresholds.
 # Change these values directly in the code if you want another calibration.
@@ -36,6 +37,9 @@ PRIORITY_STUDENT_QUOTA = 0.15   # 15% reserved for priority students
 HARD_UNMATCHED_THRESHOLD = 0.027   # 2.7%: strong unmatched-risk alert
 SOFT_UNMATCHED_THRESHOLD = 0.004   # 0.4%: lighter podium warning
 MAX_EXACT_EQUIV_PERMUTATIONS = 10000
+# If compatible strict orders keep the same predicted school but change its
+# final chance by at least 0.5 percentage point, show an intermediate warning.
+EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD = 0.005
 
 PRIORITIES = [
     "priority_sibling",
@@ -68,11 +72,20 @@ COMMUNE_COORDINATES_PATH = DATA_DIR / "commune_coordinates.csv"
 
 GEOCODING_TIMEOUT_SECONDS = 8
 GEOCODING_USER_AGENT = "sae-admission-risk-simulator/1.0"
-
-# Nominatim's usage policy caps free usage at 1 request/second. This is enforced
-# process-wide in geo.py regardless of how many sessions request geocoding
-# concurrently.
+# Nominatim's usage policy caps free usage at 1 request/second. geo.py enforces
+# this within a single Python process, regardless of how many Streamlit sessions
+# request geocoding concurrently in that process. Multi-worker deployments need
+# shared throttling or a dedicated geocoding service.
 NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
+
+# Bounding boxes used to accept coordinates from Chilean territory represented
+# in the program data. Keeping these zones in one place prevents the ingestion
+# and distance layers from disagreeing about mainland and insular coordinates.
+CHILE_COORDINATE_ZONES = (
+    ("mainland_chile", -56.0, -17.0, -76.0, -66.0),
+    ("rapa_nui", -27.3, -27.0, -109.6, -109.1),
+    ("juan_fernandez", -34.0, -33.4, -81.0, -78.5),
+)
 
 # Embedded RBD -> Region lookup built from the 2025 individual-level preferences file.
 # This lets the app sort the program dropdown by region without asking users to upload
@@ -131,7 +144,6 @@ PROGRAM_GENDER = "program_gender"
 PROGRAM_SCHOOL_DAY = "program_school_day"
 UNKNOWN_FILTER_VALUE = "Unknown"
 
-PROGRAM_RECONSTRUCTED_NAME = "program_reconstructed_name"
 PROGRAM_DISPLAY_NAME = "program_display_name"
 SCHOOL_NAME = "school_name"
 SCHOOL_COMMUNE = "school_commune"
@@ -146,7 +158,6 @@ PROGRAM_PACE = "program_pace"
 PROGRAM_ENROLLMENT_FEE = "program_enrollment_fee"
 PROGRAM_MONTHLY_FEE = "program_monthly_fee"
 PROGRAM_RELIGIOUS_ORIENTATION = "program_religious_orientation"
-PROGRAM_RELIGIOUS_DETAIL = "program_religious_detail"
 
 TRACK_GENERAL = "General"
 TRACK_SPECIALIZED = "Specialized"

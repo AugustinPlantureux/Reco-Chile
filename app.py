@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import hashlib
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from sae_app.constants import (
+    APP_DEBUG,
     CAPACITIES_PATH,
     EQUIV_GROUP,
     HARD_UNMATCHED_THRESHOLD,
@@ -26,7 +26,6 @@ from sae_app.constants import (
     PACE_FILTER_OPTIONS,
     PAYMENT_FILTER_OPTIONS,
     PIE_FILTER_OPTIONS,
-    POP,
     PROGRAM,
     REGION,
     RELIGIOUS_FILTER_OPTIONS,
@@ -46,7 +45,10 @@ from sae_app.data_loading import (
     load_calibration,
     program_matches_filters,
     required_cols,
+    validate_core_numeric_columns,
+    validate_cumulative_share_columns,
 )
+from sae_app.errors import MtbEngineError
 from sae_app.i18n import format_option_label, initialize_language_selector, t
 from sae_app.mtb_engine import (
     attach_mtb_hashes,
@@ -54,7 +56,8 @@ from sae_app.mtb_engine import (
     compute_equivalence_order_from_precomputed,
     precompute_equivalence_availability,
 )
-from sae_app.program_options import build_options, filter_program_options
+from sae_app.program_options import build_options, compact_program_label, filter_program_options
+from sae_app.recommendations import clear_candidate_risk_cache
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.text_utils import as_bool
 from sae_app.ui_common import format_display_table
@@ -64,16 +67,55 @@ from sae_app.ui_wish_builder import render_wish_list_builder
 from sae_app.wish_list import (
     clean_wish_rows,
     compact_order_label,
+    compact_tied_order_label,
     count_equivalence_orders,
     empty_wishes,
     iter_equivalence_orders,
     non_empty_wish_rows,
-    parse_wishes,
+    parse_wishes_with_report,
     predicted_outcome_final_chance,
     predicted_outcome_from_choices,
     prepare_ordered_wishes,
     uploaded_lottery_columns,
 )
+
+# Session-state keys used by both the main flow and the RUN/IPE change callback.
+editor_state_key = "wish_rows_mtb"
+editor_import_hash_key = "wish_rows_import_hash_mtb"
+editor_mode_key = "wish_rows_ranking_mode_mtb"
+editor_widget_key_base = "wishes_builder_mtb"
+simulation_done_key = "simulation_done_mtb"
+simulation_result_key = "simulation_result_mtb"
+privacy_state_migration_key = "privacy_state_schema_v2"
+
+
+def invalidate_student_dependent_state() -> None:
+    """Clear every derived result when the student identifier changes."""
+    invalidate_simulation_state(
+        simulation_done_key=simulation_done_key,
+        simulation_result_key=simulation_result_key,
+    )
+    clear_candidate_risk_cache()
+
+
+def translate_engine_error(exc: MtbEngineError) -> str:
+    """Translate an expected engine error at the Streamlit presentation layer."""
+    return t(exc.message_key, **exc.message_kwargs)
+
+
+def migrate_legacy_sensitive_state() -> None:
+    """Discard sensitive values left by older app versions exactly once."""
+    if st.session_state.get(privacy_state_migration_key):
+        return
+
+    invalidate_simulation_state(
+        simulation_done_key=simulation_done_key,
+        simulation_result_key=simulation_result_key,
+    )
+    st.session_state.pop("simulation_student_id_mtb", None)
+    clear_candidate_risk_cache()
+    st.session_state[privacy_state_migration_key] = True
+
 
 # ===========================================================================
 # Page setup
@@ -85,6 +127,7 @@ st.set_page_config(
     layout="wide",
 )
 initialize_language_selector()
+migrate_legacy_sensitive_state()
 st.title(t("SAE admission-risk simulation"))
 st.caption(
     t("MTB mode (admission 2026): SHA-256(RUN/IPE+RBD) percentile by school. Results are estimates based on last year's calibration data, not official admission guarantees.")
@@ -92,40 +135,45 @@ st.caption(
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
-    #st.caption(t("Capacities + 2024 calibration data are loaded from data/."))
-
     hard_threshold = HARD_UNMATCHED_THRESHOLD
     soft_threshold = SOFT_UNMATCHED_THRESHOLD
     if soft_threshold > hard_threshold:
         st.error(t("SOFT_UNMATCHED_THRESHOLD must be lower than or equal to HARD_UNMATCHED_THRESHOLD."))
         st.stop()
-    #
-    # st.caption(
-    #     t("Unmatched thresholds are fixed in code: hard {hard:.1%}, soft {soft:.1%}.", hard=hard_threshold, soft=soft_threshold)
-    # )
-    # st.caption(
-    #     t("Hard = Unmatched is shown first. Soft = Unmatched appears in the podium as a warning.")
-    # )
 
     national_student_id = st.text_input(
         t("Student RUN/IPE"),
         key="national_student_id_mtb",
-        placeholder="12.345.678-9",
-        help=t("Used to compute the SHA-256 percentile specific to each school. RUN format: 12.345.678-9. Dots are optional. For foreign students, enter the IPE."),
+        placeholder="12.345.678-5 / 111222333-4",
+        help=t("Used to compute the SHA-256 percentile specific to each school. Enter a valid RUN with its modulo-11 check digit, or a nine-digit IPE with its numeric verifier digit. Dots and the hyphen are optional."),
+        on_change=invalidate_student_dependent_state,
     )
 
 # ── Built-in capacities/calibration data ─────────────────────────────
-calib = load_calibration(CAPACITIES_PATH.read_bytes())
+try:
+    calibration_bytes = CAPACITIES_PATH.read_bytes()
+    calib = load_calibration(calibration_bytes)
+except (OSError, UnicodeError, ValueError) as exc:
+    st.error(t("Could not load the application data: {error}", error=str(exc)))
+    if APP_DEBUG:
+        st.exception(exc)
+    st.stop()
+
 missing = [c for c in required_cols() if c not in calib.columns]
 if missing:
     st.error(t("Missing columns: ") + ", ".join(missing[:20]))
     st.stop()
 
-invalid_population = pd.to_numeric(calib[POP], errors="coerce").isna() | (pd.to_numeric(calib[POP], errors="coerce") <= 0)
-if invalid_population.any():
-    st.error(
-        t("Invalid {pop}: {n} program(s) have missing or non-positive lottery population.", pop=POP, n=int(invalid_population.sum()))
-    )
+calibration_numeric_errors = validate_core_numeric_columns(calib)
+if calibration_numeric_errors:
+    st.error(t("Calibration numeric columns contain invalid values. Check the calibration CSV before running the app."))
+    st.code("\n".join(calibration_numeric_errors[:10]))
+    st.stop()
+
+cumulative_share_errors = validate_cumulative_share_columns(calib)
+if cumulative_share_errors:
+    st.error(t("Calibration cumulative-share columns are inconsistent or incomplete. Check the calibration CSV before running the app."))
+    st.code("\n".join(cumulative_share_errors[:10]))
     st.stop()
 
 program_options, program_mapping = build_options(calib)
@@ -174,6 +222,7 @@ wish_file = st.file_uploader(
 
 uploaded_wish_hash = None
 uploaded_wish_rows = None
+uploaded_wish_report = None
 uploaded_ignored_lottery_cols: list[str] = []
 base_rows = empty_wishes()
 
@@ -181,13 +230,17 @@ if wish_file is not None:
     try:
         wish_file_bytes = wish_file.getvalue()
         uploaded_wish_hash = hashlib.md5(wish_file_bytes).hexdigest()[:8]
-        uploaded_wish_rows = parse_wishes(wish_file_bytes, program_mapping)
+        wish_import = parse_wishes_with_report(wish_file_bytes, program_mapping)
+        uploaded_wish_rows = wish_import.wishes
+        uploaded_wish_report = wish_import.report
         uploaded_ignored_lottery_cols = uploaded_lottery_columns(wish_file_bytes)
-        base_rows = uploaded_wish_rows
+        if not uploaded_wish_report.has_issues:
+            base_rows = uploaded_wish_rows
     except Exception as exc:
         st.error(t("Could not import the CSV: {error}", error=exc))
         uploaded_wish_hash = None
         uploaded_wish_rows = None
+        uploaded_wish_report = None
         base_rows = empty_wishes()
 
 # ── Optional program-building filters ─────────────────────────────────
@@ -326,30 +379,11 @@ else:
 # Keep the wish-list state key stable across UI mode changes. Switching between
 # direct entry / guided filters or strict ranking / equivalence classes should
 # never silently reset the family's current list.
-editor_state_key = "wish_rows_mtb"
-editor_import_hash_key = "wish_rows_import_hash_mtb"
-editor_mode_key = "wish_rows_ranking_mode_mtb"
-editor_widget_key_base = "wishes_builder_mtb"
-simulation_done_key = "simulation_done_mtb"
-simulation_result_key = "simulation_result_mtb"
-simulation_student_id_key = "simulation_student_id_mtb"
-
-# Keep simulation outputs tied to the RUN/IPE that produced them. Without this,
-# a language change or a cleared RUN/IPE can leave an old simulation visible while
-# candidate-level portfolio-risk estimates fail silently.
-if (
-    st.session_state.get(simulation_done_key, False)
-    and st.session_state.get(simulation_student_id_key, "").strip() != str(national_student_id).strip()
-):
-    invalidate_simulation_state(
-        simulation_done_key=simulation_done_key,
-        simulation_result_key=simulation_result_key,
-        simulation_student_id_key=simulation_student_id_key,
-    )
-
 if editor_state_key not in st.session_state:
     st.session_state[editor_state_key] = clean_wish_rows(base_rows)
-    if uploaded_wish_hash:
+    if uploaded_wish_hash and not (
+        uploaded_wish_report and uploaded_wish_report.has_issues
+    ):
         st.session_state[editor_import_hash_key] = uploaded_wish_hash
 
 current_ranking_mode_key = "equiv" if use_equivalence_classes else "strict"
@@ -360,7 +394,6 @@ if st.session_state.get(editor_mode_key) != current_ranking_mode_key:
     invalidate_simulation_state(
         simulation_done_key=simulation_done_key,
         simulation_result_key=simulation_result_key,
-        simulation_student_id_key=simulation_student_id_key,
     )
 
 if uploaded_ignored_lottery_cols:
@@ -371,43 +404,141 @@ if uploaded_ignored_lottery_cols:
         )
     )
 
+if uploaded_wish_report is not None:
+    st.caption(
+        t(
+            "CSV import summary: {read} row(s) read, {imported} imported, {unknown} unknown program(s), {duplicates} duplicate(s), {invalid} invalid rank(s), {invalid_groups} invalid equivalence group(s).",
+            read=uploaded_wish_report.rows_read,
+            imported=uploaded_wish_report.rows_imported,
+            unknown=len(uploaded_wish_report.unknown_programs),
+            duplicates=len(uploaded_wish_report.duplicate_programs),
+            invalid=len(uploaded_wish_report.invalid_rows),
+            invalid_groups=len(uploaded_wish_report.invalid_equivalence_groups),
+        )
+    )
+
+    if not uploaded_wish_report.uses_stable_ids:
+        st.info(
+            t(
+                "This CSV uses display labels, which are less stable than rbd + program_code. Prefer the stable identifier format for future imports."
+            )
+        )
+
+    if uploaded_wish_report.has_issues:
+        st.warning(
+            t(
+                "Some CSV rows were skipped or automatically corrected. Review the details before importing."
+            )
+        )
+        if uploaded_wish_report.unknown_programs:
+            st.write(
+                t(
+                    "Unknown programs: {programs}",
+                    programs="; ".join(uploaded_wish_report.unknown_programs),
+                )
+            )
+        if uploaded_wish_report.duplicate_programs:
+            st.write(
+                t(
+                    "Duplicate programs removed: {programs}",
+                    programs="; ".join(uploaded_wish_report.duplicate_programs),
+                )
+            )
+        if uploaded_wish_report.invalid_rows:
+            invalid_row_details = "; ".join(
+                t(
+                    "CSV row {row}: invalid wish rank '{value}'",
+                    row=item.csv_row,
+                    value=item.rank_value,
+                )
+                for item in uploaded_wish_report.invalid_rows
+            )
+            st.write(t("Invalid rows: {rows}", rows=invalid_row_details))
+        if uploaded_wish_report.invalid_equivalence_groups:
+            invalid_group_details = "; ".join(
+                t(
+                    "CSV row {row}: invalid equivalence group '{value}'; wish rank {rank} was used instead",
+                    row=item.csv_row,
+                    value=item.group_value,
+                    rank=item.fallback_rank,
+                )
+                for item in uploaded_wish_report.invalid_equivalence_groups
+            )
+            st.write(
+                t(
+                    "Invalid equivalence groups: {groups}",
+                    groups=invalid_group_details,
+                )
+            )
+
 if uploaded_wish_rows is not None and uploaded_wish_hash:
     already_imported = st.session_state.get(editor_import_hash_key) == uploaded_wish_hash
     current_non_empty_wishes = non_empty_wish_rows(st.session_state[editor_state_key])
     uploaded_non_empty_wishes = non_empty_wish_rows(uploaded_wish_rows)
+    import_has_issues = bool(uploaded_wish_report and uploaded_wish_report.has_issues)
 
-    if not already_imported and current_non_empty_wishes.empty:
+    if uploaded_non_empty_wishes.empty:
+        st.info(t("The uploaded CSV does not contain any valid wish."))
+    elif not already_imported and current_non_empty_wishes.empty and not import_has_issues:
         st.session_state[editor_state_key] = clean_wish_rows(uploaded_wish_rows)
         st.session_state[editor_import_hash_key] = uploaded_wish_hash
         invalidate_simulation_state(
             simulation_done_key=simulation_done_key,
             simulation_result_key=simulation_result_key,
-            simulation_student_id_key=simulation_student_id_key,
         )
         clear_wish_editor_widget_state(editor_widget_key_base)
         st.success(t("Wish list imported with {n} wish(es).", n=len(uploaded_non_empty_wishes)))
     elif not already_imported:
-        st.warning(
-            t("A CSV has been uploaded, but the current wish list was not replaced automatically. Use the button below if you want to replace the current list with the uploaded file.")
-        )
-        if st.button(t("Replace current wish list with uploaded CSV")):
+        if current_non_empty_wishes.empty:
+            button_label = t("Import available rows with the indicated corrections")
+        else:
+            st.warning(
+                t(
+                    "A CSV has been uploaded, but the current wish list was not replaced automatically. Use the button below if you want to replace the current list with the uploaded file."
+                )
+            )
+            button_label = (
+                t("Replace current wish list with imported rows and indicated corrections")
+                if import_has_issues
+                else t("Replace current wish list with uploaded CSV")
+            )
+
+        if st.button(button_label):
             st.session_state[editor_state_key] = clean_wish_rows(uploaded_wish_rows)
             st.session_state[editor_import_hash_key] = uploaded_wish_hash
             invalidate_simulation_state(
                 simulation_done_key=simulation_done_key,
                 simulation_result_key=simulation_result_key,
-                simulation_student_id_key=simulation_student_id_key,
             )
             clear_wish_editor_widget_state(editor_widget_key_base)
             st.rerun()
-    elif uploaded_non_empty_wishes.empty:
-        st.info(t("The uploaded CSV does not contain any valid wish."))
 
 editor_rows = st.session_state[editor_state_key].copy()
 if PROGRAM in editor_rows.columns:
-    editor_rows[PROGRAM] = editor_rows[PROGRAM].map(
-        lambda x: x if str(x).strip() in program_mapping or str(x).strip() == "" else ""
-    )
+    program_values = editor_rows[PROGRAM].fillna("").astype(str).str.strip()
+    unavailable_programs = sorted({p for p in program_values if p and p not in program_mapping})
+
+    if unavailable_programs:
+        shown_programs = [compact_program_label(p) for p in unavailable_programs[:5]]
+        if len(unavailable_programs) > len(shown_programs):
+            shown_programs.append("...")
+
+        st.warning(
+            t(
+                "Some programs in the current wish list are no longer available in the loaded data and were removed: {programs}",
+                programs=", ".join(shown_programs),
+            )
+        )
+
+        editor_rows[PROGRAM] = program_values.map(
+            lambda x: x if x in program_mapping or x == "" else ""
+        )
+        st.session_state[editor_state_key] = clean_wish_rows(editor_rows)
+        invalidate_simulation_state(
+            simulation_done_key=simulation_done_key,
+            simulation_result_key=simulation_result_key,
+        )
+        editor_rows = st.session_state[editor_state_key].copy()
 
 current_program_values = (
     editor_rows.get(PROGRAM, pd.Series(dtype=str))
@@ -451,7 +582,6 @@ edited = render_wish_list_builder(
     use_equivalence_classes=use_equivalence_classes,
     simulation_done_key=simulation_done_key,
     simulation_result_key=simulation_result_key,
-    simulation_student_id_key=simulation_student_id_key,
 )
 
 selected = [p for p in edited[PROGRAM].dropna().astype(str).str.strip() if p]
@@ -486,6 +616,10 @@ if not reference_order.empty and national_student_id.strip():
         })
         with st.expander(t("Calculated MTB percentiles (RUN + RBD)"), expanded=False):
             st.dataframe(format_display_table(preview), width="stretch", hide_index=True)
+    except MtbEngineError as exc:
+        st.warning(
+            t("MTB preview unavailable: {error}", error=translate_engine_error(exc))
+        )
     except Exception as exc:
         st.warning(t("MTB preview unavailable: {error}", error=exc))
 
@@ -545,6 +679,7 @@ if st.button(t("Calculate unmatched risk"), type="primary"):
                     "Predicted outcome final chance": predicted_outcome_final_chance(choices, outcome),
                     "Unmatched risk": p_unmatched,
                     "Flagged at risk": at_risk,
+                    "Order inside tied programs": compact_tied_order_label(strict_order),
                     "Strict order": compact_order_label(strict_order),
                 })
 
@@ -571,17 +706,20 @@ if st.button(t("Calculate unmatched risk"), type="primary"):
             }
 
         st.session_state[simulation_result_key] = simulation_result
-        st.session_state[simulation_student_id_key] = str(national_student_id).strip()
         st.session_state[simulation_done_key] = True
         calculated_now = True
         render_simulation_result(simulation_result)
+
+    except MtbEngineError as exc:
+        st.error(translate_engine_error(exc))
 
     except ValueError as exc:
         st.error(str(exc))
 
     except Exception as exc:
         st.error(t("Unexpected error during the simulation."))
-        st.exception(exc)
+        if APP_DEBUG:
+            st.exception(exc)
 
 if st.session_state.get(simulation_done_key, False):
     if not calculated_now:
@@ -596,7 +734,6 @@ if st.session_state.get(simulation_done_key, False):
         use_equivalence_classes=use_equivalence_classes,
         simulation_done_key=simulation_done_key,
         simulation_result_key=simulation_result_key,
-        simulation_student_id_key=simulation_student_id_key,
     )
 else:
     st.subheader(t("4. Recommended similar programs"))

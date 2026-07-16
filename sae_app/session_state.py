@@ -17,15 +17,12 @@ def invalidate_simulation_state(
     *,
     simulation_done_key: str | None = None,
     simulation_result_key: str | None = None,
-    simulation_student_id_key: str | None = None,
 ) -> None:
     """Invalidate cached simulation output after any input that affects results changes."""
     if simulation_done_key:
         st.session_state[simulation_done_key] = False
     if simulation_result_key:
         st.session_state.pop(simulation_result_key, None)
-    if simulation_student_id_key:
-        st.session_state.pop(simulation_student_id_key, None)
 
 
 def clear_wish_editor_widget_state(editor_widget_key_base: str) -> None:
@@ -43,7 +40,6 @@ def update_builder_state(
     use_equivalence_classes: bool,
     simulation_done_key: str | None = None,
     simulation_result_key: str | None = None,
-    simulation_student_id_key: str | None = None,
 ) -> None:
     """Save builder state and invalidate previous simulation output."""
     st.session_state[editor_state_key] = normalize_builder_wishes(
@@ -54,7 +50,6 @@ def update_builder_state(
     invalidate_simulation_state(
         simulation_done_key=simulation_done_key,
         simulation_result_key=simulation_result_key,
-        simulation_student_id_key=simulation_student_id_key,
     )
 
     clear_wish_editor_widget_state(editor_widget_key_base)

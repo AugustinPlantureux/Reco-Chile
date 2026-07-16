@@ -16,6 +16,7 @@ import streamlit as st
 from sae_app.constants import (
     CAPACITY,
     EQUIV_GROUP,
+    HARD_UNMATCHED_THRESHOLD,
     NO_PRIORITY,
     POP,
     PROGRAM,
@@ -29,13 +30,23 @@ from sae_app.constants import (
     PROGRAM_SCHOOL_DAY,
     PROGRAM_SPECIALTY_SECTOR,
     PROGRAM_TRACK,
+    SOFT_UNMATCHED_THRESHOLD,
     TRUE_APP,
     UNKNOWN_REGION,
     WISH_RANK,
 )
-from sae_app.geo import haversine_km, program_coordinates, proximity_from_distance, valid_lat_lon
+from sae_app.geo import (
+    commune_coordinate_lookup,
+    haversine_km,
+    home_distance_filter_is_reliable,
+    program_coordinate_reference_priority,
+    program_coordinates,
+    proximity_from_distance,
+    valid_lat_lon,
+)
+from sae_app.errors import CandidateEvaluationError
 from sae_app.i18n import t
-from sae_app.mtb_engine import attach_mtb_hashes, availability, normalize_run
+from sae_app.mtb_engine import attach_mtb_hashes, availability
 from sae_app.program_options import ProgramRecord
 from sae_app.text_utils import as_float, clean_recommendation_value, normalize_geo_key
 from sae_app.wish_list import make_builder_wish_row
@@ -75,16 +86,24 @@ RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT = 2.25
 RECOMMENDATION_MIN_SIMILARITY_SCORE = 0.12
 RECOMMENDATION_PROXIMITY_WEIGHT = 0.75
 RECOMMENDATION_DISTANCE_SCALE_KM = 50.0
+# When a home address is provided, exclude schools farther than this
+# straight-line distance only when both endpoints are reliable enough:
+# address/street-level home geocoding and program/commune-level coordinates.
+# Regional and city-level approximations affect scoring but never exclusion.
+RECOMMENDATION_MAX_HOME_DISTANCE_KM = 100.0
 RECOMMENDATION_DIVERSIFY = True
 RECOMMENDATION_DIVERSITY_STRENGTH = 0.35
+# Number of valid wishes after which the revealed-preference profile is treated
+# as fully reliable. Shorter lists still work, but similarity has less influence
+# on candidate filtering and final ranking.
+RECOMMENDATION_FULL_RELIABILITY_WISH_COUNT = 4.0
 
-# Color-code recommended schools from their probability of being available if
-# the student reaches that wish, using the student's real MTB hash for that
-# school and assuming no new special priority flags unless the family adds them
-# manually afterward.
-SAFETY_OPTION_THRESHOLD = 0.70
-BALANCED_OPTION_THRESHOLD = 0.35
-CANDIDATE_RISK_CACHE_SESSION_KEY = "candidate_risk_cache_v1"
+# Recommendation row colors use the same unmatched-risk thresholds as the
+# simulation summary, applied to the projected risk after appending a program.
+# This makes the color depend on the real marginal portfolio effect rather than
+# only on the conditional chance of admission.
+CANDIDATE_RISK_CACHE_SESSION_KEY = "candidate_risk_cache_v2"
+LEGACY_CANDIDATE_RISK_CACHE_SESSION_KEYS = ("candidate_risk_cache_v1",)
 
 
 def wish_rank_weight(rank, rank_sensitive: bool = True) -> float:
@@ -115,6 +134,7 @@ def build_wish_profile(
     program_mapping: dict[str, pd.Series],
     *,
     rank_sensitive: bool = True,
+    commune_lookup: dict[tuple[str, str], tuple[float, float]] | None = None,
 ) -> tuple[dict, pd.DataFrame]:
     """
     Build the student's revealed-preference profile from the current wish list.
@@ -133,7 +153,6 @@ def build_wish_profile(
         "selected_programs": set(valid_wishes[PROGRAM].tolist()),
         "valid_wish_count": int(len(valid_wishes)),
         "total_wish_weight": 0.0,
-        "regions": {},
         "criteria": {},
         "criterion_coverage": {},
         "geo_reference": {},
@@ -148,12 +167,20 @@ def build_wish_profile(
         weight = wish_rank_weight(recommendation_rank_value(wish), rank_sensitive=rank_sensitive)
         profile["total_wish_weight"] += weight
 
-        region = program.region or UNKNOWN_REGION
-        profile["regions"][region] = profile["regions"].get(region, 0.0) + weight
-
-        lat, lon, _ = program_coordinates(program)
+        lat, lon, coordinate_source = program_coordinates(
+            program,
+            commune_lookup=commune_lookup,
+        )
         if valid_lat_lon(lat, lon):
-            geo_rows.append({"lat": lat, "lon": lon, "weight": weight})
+            geo_rows.append({
+                "lat": lat,
+                "lon": lon,
+                "weight": weight,
+                "coordinate_source": coordinate_source,
+                "reference_priority": program_coordinate_reference_priority(
+                    coordinate_source
+                ),
+            })
 
         for col, _, _ in RECOMMENDATION_CRITERIA:
             value = program.criterion_value(col)
@@ -165,16 +192,17 @@ def build_wish_profile(
 
     total_wish_weight = max(float(profile["total_wish_weight"]), 1e-9)
 
-    total_region_weight = sum(profile["regions"].values())
-    if total_region_weight > 0:
-        profile["regions"] = {k: v / total_region_weight for k, v in profile["regions"].items()}
-
     if geo_rows:
-        geo_weight = sum(g["weight"] for g in geo_rows)
+        best_reference_priority = max(g["reference_priority"] for g in geo_rows)
+        reference_geo_rows = [
+            g for g in geo_rows
+            if g["reference_priority"] == best_reference_priority
+        ]
+        geo_weight = sum(g["weight"] for g in reference_geo_rows)
         profile["geo_reference"] = {
-            "lat": sum(g["lat"] * g["weight"] for g in geo_rows) / geo_weight,
-            "lon": sum(g["lon"] * g["weight"] for g in geo_rows) / geo_weight,
-            "coverage": geo_weight / total_wish_weight,
+            "lat": sum(g["lat"] * g["weight"] for g in reference_geo_rows) / geo_weight,
+            "lon": sum(g["lon"] * g["weight"] for g in reference_geo_rows) / geo_weight,
+            "coordinate_reference_priority": best_reference_priority,
         }
 
     for col, _, _ in RECOMMENDATION_CRITERIA:
@@ -187,6 +215,7 @@ def build_wish_profile(
             profile["criteria"][col] = {k: v / total for k, v in dist.items()}
 
     auto_weights = automatic_recommendation_weights(profile)
+    profile_reliability = recommendation_profile_reliability(profile)
     dominant_rows = []
 
     for col, label, _ in RECOMMENDATION_CRITERIA:
@@ -201,22 +230,36 @@ def build_wish_profile(
             "Dominant value in current list": dominant_value,
             "Share": f"{dominant_share:.0%}",
             "Coverage": f"{coverage:.0%}",
-            "Automatic weight": round(auto_weights.get(col, 0.0), 2),
+            "Automatic weight": round(
+                auto_weights.get(col, 0.0) * profile_reliability,
+                2,
+            ),
         })
 
     profile_table = pd.DataFrame(dominant_rows)
     return profile, profile_table
 
 
-def automatic_recommendation_weights(profile: dict) -> dict[str, float]:
-    """Infer criterion weights from revealed preferences only.
-
-    Automatic signal = base_weight × dominance × coverage × reliability.
-    Coverage prevents a sparsely observed criterion from dominating the profile.
-    """
+def recommendation_profile_reliability(profile: dict) -> float:
+    """Return the confidence assigned to similarity inferred from the wish list."""
     valid_wish_count = max(int(profile.get("valid_wish_count", 0)), 0)
-    reliability = min(valid_wish_count / 4.0, 1.0)
+    full_reliability_count = max(
+        float(RECOMMENDATION_FULL_RELIABILITY_WISH_COUNT),
+        1.0,
+    )
+    return float(np.clip(valid_wish_count / full_reliability_count, 0.0, 1.0))
 
+
+def automatic_recommendation_weights(profile: dict) -> dict[str, float]:
+    """Infer relative criterion weights from revealed preferences only.
+
+    Automatic signal = base_weight × dominance × coverage.
+
+    These weights determine the relative importance of the criteria. Profile
+    reliability is applied after similarity normalization so it cannot cancel
+    out as a common multiplicative factor. Coverage prevents a sparsely observed
+    criterion from dominating the profile.
+    """
     weights: dict[str, float] = {}
     for criterion_col, _, base_weight in RECOMMENDATION_CRITERIA:
         distribution = profile.get("criteria", {}).get(criterion_col, {})
@@ -226,7 +269,7 @@ def automatic_recommendation_weights(profile: dict) -> dict[str, float]:
             auto_signal = 0.0
         else:
             dominance = max(float(v) for v in distribution.values())
-            auto_signal = dominance * coverage * reliability
+            auto_signal = dominance * coverage
 
         weights[criterion_col] = float(base_weight) * auto_signal
 
@@ -274,18 +317,18 @@ def current_unmatched_risk_from_simulation_result(simulation_result: dict | None
     return np.nan
 
 
-def risk_color_from_availability(availability_probability: float) -> str:
-    """Return the row color bucket used for recommendation display."""
+def risk_color_from_projected_unmatched_risk(projected_unmatched_risk: float) -> str:
+    """Color a recommendation from the risk remaining after it is appended."""
     try:
-        p = float(availability_probability)
+        risk = float(projected_unmatched_risk)
     except (TypeError, ValueError):
         return "gray"
 
-    if not np.isfinite(p):
+    if not np.isfinite(risk):
         return "gray"
-    if p >= SAFETY_OPTION_THRESHOLD:
+    if risk < SOFT_UNMATCHED_THRESHOLD:
         return "green"
-    if p >= BALANCED_OPTION_THRESHOLD:
+    if risk < HARD_UNMATCHED_THRESHOLD:
         return "orange"
     return "red"
 
@@ -301,18 +344,13 @@ def format_probability(value: float) -> str:
 def candidate_risk_cache_key(
     candidate_label: str,
     candidate_program: pd.Series,
-    student_id: str,
 ) -> tuple:
-    """Cache key for candidate base risk metrics independent of list position."""
-    try:
-        normalized_student_id = normalize_run(student_id)
-    except ValueError:
-        # Keep the key stable for invalid/empty intermediate UI states; the
-        # actual risk computation will still validate the RUN/IPE before use.
-        normalized_student_id = str(student_id).strip().upper().replace(".", "")
+    """Cache key for candidate metrics within the current student session.
 
+    The student identifier is deliberately excluded. The whole cache is cleared
+    by the UI whenever the RUN/IPE widget changes.
+    """
     return (
-        normalized_student_id,
         str(candidate_label),
         str(candidate_program.get("rbd", "")).strip(),
         str(candidate_program.get("program_code", "")).strip(),
@@ -322,6 +360,13 @@ def candidate_risk_cache_key(
         round(as_float(candidate_program.get(f"priority_share_{NO_PRIORITY}_2024", 0), 0.0), 8),
         round(as_float(candidate_program.get(f"cum_share_before_{NO_PRIORITY}_2024", 0), 0.0), 8),
     )
+
+
+def clear_candidate_risk_cache() -> None:
+    """Remove all student-derived recommendation metrics from session state."""
+    st.session_state.pop(CANDIDATE_RISK_CACHE_SESSION_KEY, None)
+    for legacy_key in LEGACY_CANDIDATE_RISK_CACHE_SESSION_KEYS:
+        st.session_state.pop(legacy_key, None)
 
 
 def cached_candidate_base_metrics(
@@ -336,21 +381,16 @@ def cached_candidate_base_metrics(
     scales the final appended chance and can be applied cheaply after lookup.
     """
     cache = st.session_state.setdefault(CANDIDATE_RISK_CACHE_SESSION_KEY, {})
-    key = candidate_risk_cache_key(candidate_label, candidate_program, student_id)
+    key = candidate_risk_cache_key(candidate_label, candidate_program)
     if key in cache:
         return cache[key]
 
     candidate_wish = pd.DataFrame([make_builder_wish_row(candidate_label, 1, 1)])
 
-    try:
-        hashed = attach_mtb_hashes(candidate_wish, program_mapping, student_id)
-        avail = availability(hashed.iloc[0], candidate_program)
-        chance_if_considered = float(avail.get("availability_probability", np.nan))
-        lottery_rank = int(avail.get("lottery_number", 1))
-    except (KeyError, ValueError, IndexError) as exc:
-        LOGGER.warning("Portfolio-risk estimate unavailable for %s: %s", candidate_label, exc)
-        chance_if_considered = np.nan
-        lottery_rank = np.nan
+    hashed = attach_mtb_hashes(candidate_wish, program_mapping, student_id)
+    avail = availability(hashed.iloc[0], candidate_program)
+    chance_if_considered = float(avail.get("availability_probability", np.nan))
+    lottery_rank = int(avail.get("lottery_number", 1))
 
     out = {
         "chance_if_considered_raw": chance_if_considered,
@@ -390,13 +430,18 @@ def candidate_portfolio_metrics(
     base_unmatched = float(current_unmatched_risk) if np.isfinite(current_unmatched_risk) else np.nan
     if np.isfinite(base_unmatched) and np.isfinite(chance_if_considered):
         final_chance_if_appended = base_unmatched * chance_if_considered
+        projected_unmatched_risk = float(
+            np.clip(base_unmatched - final_chance_if_appended, 0.0, 1.0)
+        )
     else:
         final_chance_if_appended = np.nan
+        projected_unmatched_risk = np.nan
 
     return {
         "chance_if_considered_raw": chance_if_considered,
         "final_chance_if_appended_raw": final_chance_if_appended,
-        "risk_color": risk_color_from_availability(chance_if_considered),
+        "projected_unmatched_risk_raw": projected_unmatched_risk,
+        "risk_color": risk_color_from_projected_unmatched_risk(projected_unmatched_risk),
         "estimated_lottery_rank": lottery_rank,
     }
 
@@ -490,6 +535,7 @@ def recommend_similar_programs(
     proximity_weight: float = RECOMMENDATION_PROXIMITY_WEIGHT,
     distance_scale_km: float = RECOMMENDATION_DISTANCE_SCALE_KM,
     home_geo_reference: dict | None = None,
+    max_home_distance_km: float | None = RECOMMENDATION_MAX_HOME_DISTANCE_KM,
     risk_optimization_weight: float = RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT,
     min_similarity_score: float = RECOMMENDATION_MIN_SIMILARITY_SCORE,
     diversify: bool = RECOMMENDATION_DIVERSIFY,
@@ -503,10 +549,12 @@ def recommend_similar_programs(
     estimates the chance of obtaining that school if reached, then converts it
     into a marginal improvement in the matched outcome.
     """
+    commune_lookup = commune_coordinate_lookup()
     profile, profile_table = build_wish_profile(
         wishes,
         program_mapping,
         rank_sensitive=rank_sensitive,
+        commune_lookup=commune_lookup,
     )
 
     if not profile:
@@ -514,15 +562,26 @@ def recommend_similar_programs(
 
     selected_programs = profile["selected_programs"]
     criterion_weights = automatic_recommendation_weights(profile)
+    profile_reliability = recommendation_profile_reliability(profile)
     active_weight_total = sum(max(float(v), 0.0) for v in criterion_weights.values())
     similarity_signal_available = active_weight_total > 0
-    min_similarity_score = max(float(min_similarity_score), 0.0) if similarity_signal_available else 0.0
+    similarity_weight = profile_reliability if similarity_signal_available else 0.0
+
+    # A short wish list should not impose an overconfident similarity filter.
+    # Reliability therefore scales both the final contribution of similarity
+    # and the minimum similarity required to retain a candidate.
+    base_min_similarity_score = max(float(min_similarity_score), 0.0)
+    effective_min_similarity_score = (
+        base_min_similarity_score * profile_reliability
+        if similarity_signal_available
+        else 0.0
+    )
 
     proximity_weight = max(float(proximity_weight), 0.0)
     competition_weight = max(float(competition_weight), 0.0)
     risk_optimization_weight = max(float(risk_optimization_weight), 0.0)
 
-    if active_weight_total <= 0 and proximity_weight <= 0 and competition_weight <= 0 and risk_optimization_weight <= 0:
+    if similarity_weight <= 0 and proximity_weight <= 0 and competition_weight <= 0 and risk_optimization_weight <= 0:
         return pd.DataFrame(), profile_table
 
     home_geo_reference = home_geo_reference or {}
@@ -539,6 +598,8 @@ def recommend_similar_programs(
         ref_lon = geo_reference.get("lon", np.nan)
 
     rows = []
+    failed_candidates = 0
+    failed_candidate_examples: list[tuple[str, str]] = []
 
     for candidate_label, row in program_mapping.items():
         if candidate_label in selected_programs:
@@ -547,6 +608,10 @@ def recommend_similar_programs(
         try:
             program = ProgramRecord.from_series(row, label=candidate_label)
             if not candidate_satisfies_hard_constraints(program, profile, hard_constraint_cols):
+                continue
+
+            capacity = max(program.capacity, 0.0)
+            if capacity <= 0:
                 continue
 
             raw_similarity = 0.0
@@ -569,22 +634,53 @@ def recommend_similar_programs(
 
                 raw_similarity += user_weight * match_share
 
-            similarity_score = raw_similarity / active_weight_total if active_weight_total > 0 else 0.0
-            if similarity_signal_available and similarity_score < min_similarity_score:
+            normalized_similarity = (
+                raw_similarity / active_weight_total
+                if active_weight_total > 0
+                else 0.0
+            )
+            if (
+                similarity_signal_available
+                and normalized_similarity < effective_min_similarity_score
+            ):
                 continue
+            similarity_score = similarity_weight * normalized_similarity
 
-            lat, lon, _ = program_coordinates(program)
+            lat, lon, coordinate_source = program_coordinates(
+                program,
+                commune_lookup=commune_lookup,
+            )
             distance_km = haversine_km(ref_lat, ref_lon, lat, lon)
-            proximity_score = proximity_from_distance(distance_km, distance_scale_km=distance_scale_km)
+            apply_hard_distance_filter = (
+                use_home_reference
+                and max_home_distance_km is not None
+                and home_distance_filter_is_reliable(
+                    home_geo_reference,
+                    coordinate_source,
+                    program,
+                )
+            )
+            if apply_hard_distance_filter:
+                if not np.isfinite(distance_km) or distance_km > float(max_home_distance_km):
+                    continue
 
-            capacity = max(program.capacity, 0.0)
+            # Approximate coordinates still influence ranking through this soft
+            # score, but they are never used to exclude a candidate outright.
+            proximity_score = proximity_from_distance(
+                distance_km,
+                distance_scale_km=distance_scale_km,
+            )
+
             true_applicants = max(program.true_applicants, 0.0)
-            if capacity > 0 and true_applicants > 0:
+            if true_applicants <= 0:
+                # If a program had available seats and no true applicants last year,
+                # it should be treated as highly accessible in the recommendation
+                # score, consistently with availability().
+                competition_ratio = 0.0
+                accessibility_score = 1.0
+            else:
                 competition_ratio = true_applicants / capacity
                 accessibility_score = min(capacity / true_applicants, 1.0)
-            else:
-                competition_ratio = np.nan
-                accessibility_score = 0.0
 
             portfolio = candidate_portfolio_metrics(
                 candidate_label,
@@ -596,7 +692,7 @@ def recommend_similar_programs(
             chance_if_considered = float(portfolio["chance_if_considered_raw"])
             risk_score = chance_if_considered if np.isfinite(chance_if_considered) else 0.0
 
-            denominator = 1.0 + proximity_weight + competition_weight + risk_optimization_weight
+            denominator = similarity_weight + proximity_weight + competition_weight + risk_optimization_weight
             final_score = (
                 similarity_score
                 + proximity_weight * proximity_score
@@ -611,27 +707,43 @@ def recommend_similar_programs(
                 "Region": clean_recommendation_value(program.region) or UNKNOWN_REGION,
                 "Program details": clean_recommendation_value(program.program_display_name),
                 "Chance if considered": format_probability(portfolio["chance_if_considered_raw"]),
-                "Estimated final chance if appended": format_probability(portfolio["final_chance_if_appended_raw"]),
+                "Marginal unmatched-risk reduction": format_probability(portfolio["final_chance_if_appended_raw"]),
+                "Projected unmatched risk after append": format_probability(portfolio["projected_unmatched_risk_raw"]),
                 "Estimated MTB rank": portfolio["estimated_lottery_rank"] if np.isfinite(portfolio["estimated_lottery_rank"]) else "",
                 "Recommendation score": round(100 * final_score, 1),
-                "Distance from home (km)": round(distance_km, 1) if use_home_reference and not pd.isna(distance_km) else "",
-                "Distance from current list (km)": round(distance_km, 1) if (not use_home_reference) and not pd.isna(distance_km) else "",
+                "Straight-line distance from home (km)": round(distance_km, 1) if use_home_reference and not pd.isna(distance_km) else "",
+                "Straight-line distance from current list (km)": round(distance_km, 1) if (not use_home_reference) and not pd.isna(distance_km) else "",
                 "Capacity": int(capacity) if capacity == int(capacity) else capacity,
                 "Applicants / seat": round(competition_ratio, 2) if not pd.isna(competition_ratio) else "",
                 "_recommendation_score_raw": float(final_score),
                 "_similarity_score_raw": float(similarity_score),
                 "_chance_if_considered_raw": float(risk_score),
                 "_proximity_score_raw": float(proximity_score),
+                "_projected_unmatched_risk_raw": portfolio["projected_unmatched_risk_raw"],
                 "_risk_color": portfolio["risk_color"],
                 "_similarity_fallback_mode": not similarity_signal_available,
                 "_features": candidate_feature_values(program),
             })
-        except Exception:
-            LOGGER.exception("Skipping recommendation candidate after unexpected error: %s", candidate_label)
+        except CandidateEvaluationError as exc:
+            failed_candidates += 1
+            if len(failed_candidate_examples) < 5:
+                failed_candidate_examples.append((candidate_label, str(exc)))
+            LOGGER.warning(
+                "Skipping malformed recommendation candidate %s: %s",
+                candidate_label,
+                exc,
+            )
             continue
 
+    diagnostics = {
+        "failed_candidates": failed_candidates,
+        "failed_candidate_examples": tuple(failed_candidate_examples),
+    }
+
     if not rows:
-        return pd.DataFrame(), profile_table
+        empty = pd.DataFrame()
+        empty.attrs["recommendation_diagnostics"] = diagnostics
+        return empty, profile_table
 
     candidates = pd.DataFrame(rows)
     if diversify:
@@ -646,5 +758,6 @@ def recommend_similar_programs(
             ascending=[False, False, False, False, True],
         ).head(max_recommendations).copy()
 
-    out = out.drop(columns=["_features"], errors="ignore")
-    return out.reset_index(drop=True), profile_table
+    out = out.drop(columns=["_features"], errors="ignore").reset_index(drop=True)
+    out.attrs["recommendation_diagnostics"] = diagnostics
+    return out, profile_table
