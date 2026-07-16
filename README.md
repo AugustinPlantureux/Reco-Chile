@@ -20,16 +20,17 @@ The app estimates the probability of assignment to each program in a student's w
 - Recommend similar programs using revealed preferences, geographic proximity, competition, expected risk reduction, and diversity.
 - Geocode an optional Chilean home address and restrict suggestions to a realistic radius.
 - Switch between Spanish and English from the interface.
+- Use progressive, family-facing explanations while keeping MTB ranks, calibration details, and recommendation methodology available on demand.
 
 ## Application workflow
 
-1. Enter the student's RUN or IPE.
-2. Indicate whether the wish list already exists or should be built with filters.
-3. Choose a strict ranking or equivalence classes.
-4. Add programs and mark every applicable priority.
-5. Run the simulation.
-6. Review wish-level probabilities, the unmatched-risk warning, and the most likely outcomes.
-7. Inspect suggested backup programs, add acceptable ones to the end of the list, mark any applicable priority, and rerun the simulation.
+1. Enter the student's RUN or IPE and indicate whether the wish list already exists.
+2. Add programs in the family's genuine order of preference. An optional planning toggle can compare undecided internal orders.
+3. Mark every applicable priority for each establishment and analyze the list.
+4. Review the unmatched-risk estimate, the outcomes ordered by probability, and the short family-facing wish table.
+5. Open the optional detail panels to inspect MTB ranks, calibration inputs, assumptions, or equivalence-order sensitivity.
+6. Inspect suggested backup programs, compare the projected risk after appending each one, and add only acceptable options.
+7. Verify priorities for newly added programs and rerun the analysis.
 
 The guided program search can filter by:
 
@@ -113,13 +114,13 @@ The interface distinguishes between:
 - **Chance if considered:** availability conditional on reaching that wish.
 - **Final chance of assignment:** availability after accounting for every higher-ranked wish.
 
-The current warning thresholds are defined in `sae_app/constants.py`:
+The current attention thresholds are defined in `sae_app/constants.py`:
 
-- `2.7%`: strong unmatched-risk alert;
-- `0.4%` to `2.7%`: moderate warning shown in the outcome podium;
-- below `0.4%`: the podium focuses on school assignments.
+- `2.7%` or above: high attention;
+- `0.4%` to below `2.7%`: moderate attention;
+- below `0.4%`: low attention.
 
-These are presentation thresholds, not official SAE cutoffs.
+These are presentation thresholds, not official SAE cutoffs. They control only the alert message. Estimated outcomes are always ordered by their actual modeled probability, so the alert never changes the likelihood ranking.
 
 ## Equivalence classes
 

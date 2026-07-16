@@ -13,12 +13,68 @@ import hashlib
 import pandas as pd
 import streamlit as st
 
-from sae_app.constants import EQUIV_GROUP, LOTTERY, PRIORITIES, PROGRAM, PROGRAM_DISPLAY_NAME, REGION, SAFETY, SCHOOL_COMMUNE, WISH_RANK
+from sae_app.constants import (
+    EQUIV_GROUP,
+    LOTTERY,
+    PRIORITIES,
+    PROGRAM,
+    PROGRAM_DISPLAY_NAME,
+    PROGRAM_ENROLLMENT_FEE,
+    PROGRAM_MONTHLY_FEE,
+    PROGRAM_PACE,
+    PROGRAM_PIE,
+    PROGRAM_RELIGIOUS_ORIENTATION,
+    PROGRAM_SCHOOL_DAY,
+    PROGRAM_TRACK,
+    REGION,
+    SAFETY,
+    SCHOOL_COMMUNE,
+    WISH_RANK,
+)
 from sae_app.i18n import t
 from sae_app.program_options import compact_program_label
 from sae_app.session_state import invalidate_simulation_state, update_builder_state
 from sae_app.text_utils import as_bool
 from sae_app.wish_list import make_builder_wish_row, non_empty_wish_rows, normalize_builder_wishes
+
+
+def _family_display_value(value) -> str:
+    """Return a translated, non-empty value for a family-facing program card."""
+    text = str(value or "").strip()
+    if not text or text.lower() == "nan":
+        return t("No information")
+    return t(text)
+
+
+def _render_program_details(program_row: pd.Series) -> None:
+    """Show the characteristics families most often need before adding a program."""
+    detail_rows = [
+        ("Program details", PROGRAM_DISPLAY_NAME),
+        ("Commune", SCHOOL_COMMUNE),
+        ("Region", REGION),
+        ("Program type", PROGRAM_TRACK),
+        ("School day", PROGRAM_SCHOOL_DAY),
+        ("PIE", PROGRAM_PIE),
+        ("PACE", PROGRAM_PACE),
+        ("Enrollment fee", PROGRAM_ENROLLMENT_FEE),
+        ("Monthly fee", PROGRAM_MONTHLY_FEE),
+        ("Religious orientation", PROGRAM_RELIGIOUS_ORIENTATION),
+    ]
+    for label, column in detail_rows:
+        st.markdown(f"**{t(label)}:** {_family_display_value(program_row.get(column, ''))}")
+
+
+def _active_priority_labels(row: pd.Series) -> list[str]:
+    labels = []
+    if as_bool(row.get("priority_sibling", False)):
+        labels.append(t("Sibling priority"))
+    if as_bool(row.get("priority_student", False)):
+        labels.append(t("Priority-student quota"))
+    if as_bool(row.get("priority_parent_civil_servant", False)):
+        labels.append(t("Civil-servant child priority"))
+    if as_bool(row.get("priority_ex_student", False)):
+        labels.append(t("Former-student priority"))
+    return labels
 
 
 def render_wish_list_builder(
@@ -48,7 +104,7 @@ def render_wish_list_builder(
         if str(p).strip() and p in program_mapping and p not in selected_programs
     ]
 
-    st.markdown(t("#### Add programs"))
+    st.markdown(t("#### Search and add programs"))
 
     add_cols = st.columns([5, 1])
     with add_cols[0]:
@@ -99,7 +155,8 @@ def render_wish_list_builder(
         st.info(t("No program selected yet. Add the student's first wish above."))
         return current
 
-    st.markdown(t("#### Current wish list"))
+    st.markdown(t("#### Current preference list"))
+    st.caption(t("{n} program(s) selected", n=len(current_non_empty)))
 
     if use_equivalence_classes:
         st.caption(
@@ -120,7 +177,7 @@ def render_wish_list_builder(
         row_key = hashlib.md5(program_label.encode("utf-8")).hexdigest()[:10]
 
         with st.container(border=True):
-            top_cols = st.columns([0.8, 5, 0.7, 0.7, 1])
+            top_cols = st.columns([0.8, 5, 1.2])
 
             with top_cols[0]:
                 if use_equivalence_classes:
@@ -153,12 +210,45 @@ def render_wish_list_builder(
                     if details:
                         st.caption(details)
 
+                    with st.popover(t("View program details")):
+                        _render_program_details(program_row)
+
+                active_priorities = _active_priority_labels(row)
+                if active_priorities:
+                    st.caption(
+                        t(
+                            "Declared priorities: {priorities}",
+                            priorities=", ".join(active_priorities),
+                        )
+                    )
+                else:
+                    st.caption(t("No priority declared for this program"))
+
             with top_cols[2]:
-                if not use_equivalence_classes:
+                if st.button(
+                    t("Remove"),
+                    key=f"{editor_widget_key_base}_remove_{row_key}",
+                    use_container_width=True,
+                ):
+                    updated = display_rows.drop(index=i).reset_index(drop=True)
+
+                    update_builder_state(
+                        updated,
+                        editor_state_key=editor_state_key,
+                        editor_widget_key_base=editor_widget_key_base,
+                        use_equivalence_classes=use_equivalence_classes,
+                        simulation_done_key=simulation_done_key,
+                        simulation_result_key=simulation_result_key,
+                    )
+
+            if not use_equivalence_classes:
+                move_cols = st.columns(2)
+                with move_cols[0]:
                     if st.button(
-                        "↑",
+                        t("Move up"),
                         disabled=i == 0,
                         key=f"{editor_widget_key_base}_up_{row_key}",
+                        use_container_width=True,
                     ):
                         updated = display_rows.copy()
                         order = list(range(len(updated)))
@@ -173,13 +263,12 @@ def render_wish_list_builder(
                             simulation_done_key=simulation_done_key,
                             simulation_result_key=simulation_result_key,
                         )
-
-            with top_cols[3]:
-                if not use_equivalence_classes:
+                with move_cols[1]:
                     if st.button(
-                        "↓",
+                        t("Move down"),
                         disabled=i == len(display_rows) - 1,
                         key=f"{editor_widget_key_base}_down_{row_key}",
+                        use_container_width=True,
                     ):
                         updated = display_rows.copy()
                         order = list(range(len(updated)))
@@ -195,49 +284,47 @@ def render_wish_list_builder(
                             simulation_result_key=simulation_result_key,
                         )
 
-            with top_cols[4]:
-                if st.button(
-                    t("Remove"),
-                    key=f"{editor_widget_key_base}_remove_{row_key}",
-                ):
-                    updated = display_rows.drop(index=i).reset_index(drop=True)
-
-                    update_builder_state(
-                        updated,
-                        editor_state_key=editor_state_key,
-                        editor_widget_key_base=editor_widget_key_base,
-                        use_equivalence_classes=use_equivalence_classes,
-                        simulation_done_key=simulation_done_key,
-                        simulation_result_key=simulation_result_key,
+            with st.expander(
+                t("Does the student have priority at this establishment?"),
+                expanded=False,
+            ):
+                st.caption(
+                    t(
+                        "Mark only the situations that apply to this specific establishment. SAE recognizes the four priority criteria below."
                     )
+                )
+                priority_sibling = st.checkbox(
+                    t("Has a sibling enrolled at the establishment"),
+                    value=as_bool(row.get("priority_sibling", False)),
+                    key=f"{editor_widget_key_base}_sib_{row_key}",
+                )
+                priority_student = st.checkbox(
+                    t("Belongs to the 15% priority-student quota"),
+                    value=as_bool(row.get("priority_student", False)),
+                    key=f"{editor_widget_key_base}_student_{row_key}",
+                )
+                priority_parent = st.checkbox(
+                    t("Is the child of an employee of the establishment"),
+                    value=as_bool(row.get("priority_parent_civil_servant", False)),
+                    key=f"{editor_widget_key_base}_parent_{row_key}",
+                )
+                priority_ex_student = st.checkbox(
+                    t("Previously attended the establishment and was not expelled"),
+                    value=as_bool(row.get("priority_ex_student", False)),
+                    key=f"{editor_widget_key_base}_ex_{row_key}",
+                )
 
-            prio_cols = st.columns(5)
-
-            priority_sibling = prio_cols[0].checkbox(
-                t("Sibling"),
-                value=as_bool(row.get("priority_sibling", False)),
-                key=f"{editor_widget_key_base}_sib_{row_key}",
-            )
-            priority_student = prio_cols[1].checkbox(
-                t("Priority student"),
-                value=as_bool(row.get("priority_student", False)),
-                key=f"{editor_widget_key_base}_student_{row_key}",
-            )
-            priority_parent = prio_cols[2].checkbox(
-                t("Civil servant"),
-                value=as_bool(row.get("priority_parent_civil_servant", False)),
-                key=f"{editor_widget_key_base}_parent_{row_key}",
-            )
-            priority_ex_student = prio_cols[3].checkbox(
-                t("Former student"),
-                value=as_bool(row.get("priority_ex_student", False)),
-                key=f"{editor_widget_key_base}_ex_{row_key}",
-            )
-            safety = prio_cols[4].checkbox(
-                t("Already enrolled"),
-                value=as_bool(row.get(SAFETY, False)),
-                key=f"{editor_widget_key_base}_safety_{row_key}",
-            )
+                st.divider()
+                st.caption(
+                    t(
+                        "Current enrollment is shown separately because it is not one of the four SAE priority criteria."
+                    )
+                )
+                safety = st.checkbox(
+                    t("The student is already enrolled in this establishment"),
+                    value=as_bool(row.get(SAFETY, False)),
+                    key=f"{editor_widget_key_base}_safety_{row_key}",
+                )
 
             edited_rows.append({
                 WISH_RANK: wish_rank_value,

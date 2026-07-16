@@ -19,9 +19,7 @@ from sae_app.constants import (
     CAPACITIES_PATH,
     EQUIV_GROUP,
     HARD_UNMATCHED_THRESHOLD,
-    HASH_PCT,
     IMPUTED,
-    LOTTERY,
     MAX_EXACT_EQUIV_PERMUTATIONS,
     PACE_FILTER_OPTIONS,
     PAYMENT_FILTER_OPTIONS,
@@ -60,7 +58,6 @@ from sae_app.program_options import build_options, compact_program_label, filter
 from sae_app.recommendations import clear_candidate_risk_cache
 from sae_app.session_state import clear_wish_editor_widget_state, invalidate_simulation_state
 from sae_app.text_utils import as_bool
-from sae_app.ui_common import format_display_table
 from sae_app.ui_recommendations import render_similar_program_recommendations
 from sae_app.ui_simulation import render_simulation_result
 from sae_app.ui_wish_builder import render_wish_list_builder
@@ -122,16 +119,17 @@ def migrate_legacy_sensitive_state() -> None:
 # ===========================================================================
 
 st.set_page_config(
-    page_title="SAE simulation – unmatched risk",
+    page_title="SAE preference-list review",
     page_icon="🎓",
-    layout="wide",
+    layout="centered",
 )
 initialize_language_selector()
 migrate_legacy_sensitive_state()
-st.title(t("SAE admission-risk simulation"))
+st.title(t("Review the risk of your SAE preference list"))
 st.caption(
-    t("MTB mode (admission 2026): SHA-256(RUN/IPE+RBD) percentile by school. Results are estimates based on last year's calibration data, not official admission guarantees.")
+    t("Add the student's preferences and estimate the risk of remaining without an assignment. This research tool supports decisions; it does not replace or submit the official SAE application.")
 )
+st.caption(t("1 · Identify the student   2 · Build the list   3 · Review the result   4 · Improve the list"))
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
@@ -141,13 +139,12 @@ with st.sidebar:
         st.error(t("SOFT_UNMATCHED_THRESHOLD must be lower than or equal to HARD_UNMATCHED_THRESHOLD."))
         st.stop()
 
-    national_student_id = st.text_input(
-        t("Student RUN/IPE"),
-        key="national_student_id_mtb",
-        placeholder="12.345.678-5 / 111222333-4",
-        help=t("Used to compute the SHA-256 percentile specific to each school. Enter a valid RUN with its modulo-11 check digit, or a nine-digit IPE with its numeric verifier digit. Dots and the hyphen are optional."),
-        on_change=invalidate_student_dependent_state,
-    )
+    with st.expander(t("About this estimate"), expanded=False):
+        st.write(
+            t(
+                "The model uses historical 2024 calibration data and 2025 capacity data. Results are estimates, not official admission guarantees."
+            )
+        )
 
 # ── Built-in capacities/calibration data ─────────────────────────────
 try:
@@ -178,14 +175,38 @@ if cumulative_share_errors:
 
 program_options, program_mapping = build_options(calib)
 
-# ── Section 1: pathway ───────────────────────────────────────────────
-st.subheader(t("1. Start with the student's preferences"))
+# ── Section 1: student and pathway ───────────────────────────────────
+st.subheader(t("1. Identify the student"))
+
+national_student_id = st.text_input(
+    t("Student RUN/IPE"),
+    key="national_student_id_mtb",
+    placeholder="12.345.678-5 / 111222333-4",
+    help=t(
+        "Enter a valid RUN with its modulo-11 check digit, or a nine-digit IPE with its numeric verifier digit. Dots and the hyphen are optional."
+    ),
+    on_change=invalidate_student_dependent_state,
+)
+
+with st.popover(t("Why do we ask for this?")):
+    st.write(
+        t(
+            "The identifier is used to reproduce the school-specific MTB tie-break calculation. It does not change or submit the student's official SAE application."
+        )
+    )
+    st.caption(
+        t(
+            "The calculation takes place in this application. A home address is sent to OpenStreetMap only if the family later chooses to geocode it for recommendation distances."
+        )
+    )
+
+st.markdown(t("#### Start from the family's current situation"))
 
 list_status = st.radio(
     t("Is the student's wish list already established?"),
     [
-        "Yes — I already have the list",
-        "No — help me build it with filters",
+        "Yes — review my list",
+        "No — help me build it",
     ],
     horizontal=True,
     format_func=format_option_label,
@@ -193,32 +214,30 @@ list_status = st.radio(
 )
 needs_builder = list_status.startswith("No")
 
-ranking_mode = st.radio(
-    t("How should preferences be entered?"),
-    [
-        "Strict ranking",
-        "Equivalence classes",
-    ],
-    horizontal=True,
-    format_func=format_option_label,
-    help=t("Strict ranking means every program has a precise rank. Equivalence classes allow several programs to share the same preference group when the family sees them as tied."),
-    key="ranking_mode_mtb",
+use_equivalence_classes = st.toggle(
+    t("I have not yet decided the exact order between some programs"),
+    value=False,
+    help=t(
+        "Use this planning option to compare possible orders. The family should still choose the order it genuinely prefers before submitting the official application."
+    ),
+    key="use_equivalence_classes_mtb",
 )
-use_equivalence_classes = ranking_mode == "Equivalence classes"
 
 if use_equivalence_classes:
     st.info(
-        t("Use the same preference-group number for programs the student considers tied. Lower group numbers are preferred. The app will test every possible order inside each tied group, so families can see whether the exact internal order changes the predicted outcome.")
-    )
-else:
-    st.info(
-        t("Enter programs in strict order. The first program is the highest-ranked choice, and the final chance of each lower option depends on not getting the options above it.")
+        t("Give the same preference-group number to programs the family currently considers tied. The app will compare every compatible order, but this exploratory grouping is not submitted to SAE.")
     )
 
-wish_file = st.file_uploader(
-    t("Optional: import a wish-list CSV to pre-fill the list"),
-    type=["csv"],
-)
+with st.expander(t("Import a preference list from CSV — optional"), expanded=False):
+    st.caption(
+        t(
+            "This option is intended for families or researchers who already have a compatible file. Most families can build the list directly below."
+        )
+    )
+    wish_file = st.file_uploader(
+        t("Choose a wish-list CSV"),
+        type=["csv"],
+    )
 
 uploaded_wish_hash = None
 uploaded_wish_rows = None
@@ -260,27 +279,37 @@ program_filters = empty_filters.copy()
 selected_program_region = "All regions"
 
 if needs_builder:
-    st.subheader(t("2. Find programs"))
-    with st.expander(t("Program search filters"), expanded=True):
-        st.caption(t("Leave every filter empty to include all programs."))
+    st.subheader(t("2. Build and order the preference list"))
+    st.caption(t("Start with the region and program type. Additional filters are optional."))
 
-        region_options = ["All regions"] + available_regions(calib)
-        selected_program_region = st.selectbox(
-            t("Program region"),
-            region_options,
-            index=0,
-            format_func=format_option_label,
-            help=t("Choose a region to make the program list shorter. Already selected programs from other regions are kept in the list."),
-            key="program_region_filter_mtb",
-        )
+    region_options = ["All regions"] + available_regions(calib)
+    selected_program_region = st.selectbox(
+        t("Program region"),
+        region_options,
+        index=0,
+        format_func=format_option_label,
+        help=t("Choose a region to make the program list shorter. Already selected programs from other regions are kept in the list."),
+        key="program_region_filter_mtb",
+    )
 
-        c1, c2 = st.columns(2)
-        with c1:
-            filter_general = st.checkbox(t("General academic programs"), value=False, key="filter_general_mtb")
-        with c2:
-            filter_specialized = st.checkbox(t("Specialized / technical programs"), value=False, key="filter_specialized_mtb")
+    c1, c2 = st.columns(2)
+    with c1:
+        filter_general = st.checkbox(t("General academic programs"), value=False, key="filter_general_mtb")
+    with c2:
+        filter_specialized = st.checkbox(t("Specialized / technical programs"), value=False, key="filter_specialized_mtb")
 
-        selected_specialty_sectors = []
+    selected_specialty_sectors = []
+    selected_genders = []
+    selected_school_days = []
+    selected_rurality = []
+    selected_pie = []
+    selected_pace = []
+    selected_enrollment_fee = []
+    selected_monthly_fee = []
+    selected_religious_orientation = []
+
+    with st.expander(t("More filters: school day, PIE, PACE, fees and other characteristics"), expanded=False):
+        st.caption(t("Leave a filter empty when that characteristic is not essential for the family."))
         if filter_specialized:
             selected_specialty_sectors = st.multiselect(
                 t("Specialized area"),
@@ -359,21 +388,21 @@ if needs_builder:
                 key="filter_religious_orientation_mtb",
             )
 
-        program_filters = {
-            "tracks": ([TRACK_GENERAL] if filter_general else []) + ([TRACK_SPECIALIZED] if filter_specialized else []),
-            "specialty_sectors": selected_specialty_sectors,
-            "genders": selected_genders,
-            "school_days": selected_school_days,
-            "rurality": selected_rurality,
-            "pie": selected_pie,
-            "pace": selected_pace,
-            "enrollment_fee": selected_enrollment_fee,
-            "monthly_fee": selected_monthly_fee,
-            "religious_orientation": selected_religious_orientation,
-        }
+    program_filters = {
+        "tracks": ([TRACK_GENERAL] if filter_general else []) + ([TRACK_SPECIALIZED] if filter_specialized else []),
+        "specialty_sectors": selected_specialty_sectors,
+        "genders": selected_genders,
+        "school_days": selected_school_days,
+        "rurality": selected_rurality,
+        "pie": selected_pie,
+        "pace": selected_pace,
+        "enrollment_fee": selected_enrollment_fee,
+        "monthly_fee": selected_monthly_fee,
+        "religious_orientation": selected_religious_orientation,
+    }
 else:
-    st.subheader(t("2. Enter the list"))
-    st.caption(t("Use the builder below to enter the existing wish list directly."))
+    st.subheader(t("2. Build and order the preference list"))
+    st.caption(t("Add the programs in the order the family genuinely prefers."))
 
 # ── Wish-list builder ─────────────────────────────────────────────────
 # Keep the wish-list state key stable across UI mode changes. Switching between
@@ -574,6 +603,15 @@ if needs_builder and (selected_program_region != "All regions" or filters_are_ac
         + extra_note
     )
 
+added_recommendation_count = st.session_state.pop("recommendations_added_notice", 0)
+if added_recommendation_count:
+    st.success(
+        t(
+            "{n} recommended program(s) were added at the end of the list. Check priorities for the new programs, then analyze the list again.",
+            n=added_recommendation_count,
+        )
+    )
+
 edited = render_wish_list_builder(
     editor_state_key=editor_state_key,
     editor_widget_key_base=editor_widget_key_base,
@@ -590,41 +628,16 @@ imputed = [
     if p in program_mapping and as_bool(program_mapping[p].get(IMPUTED, False))
 ]
 if imputed:
-    st.warning(
-        t("Less reliable estimate: at least one selected program uses mean-imputed 2024 calibration values.")
-    )
-
-# ── MTB percentile preview ────────────────────────────────────────────
-reference_order = prepare_ordered_wishes(edited, use_equivalence_classes)
-if not reference_order.empty and national_student_id.strip():
-    try:
-        preview_w = attach_mtb_hashes(reference_order, program_mapping, national_student_id)
-        preview_cols = [WISH_RANK, PROGRAM, LOTTERY, HASH_PCT]
-        if use_equivalence_classes:
-            preview_cols.insert(1, EQUIV_GROUP)
-        preview = preview_w[preview_cols].copy()
-        preview[HASH_PCT] = (
-            pd.to_numeric(preview[HASH_PCT], errors="coerce")
-            .map(lambda x: "" if pd.isna(x) else f"{x:.4f}")
+    st.info(t("Some selected programs use estimated historical calibration values."))
+    with st.expander(t("What does this mean?"), expanded=False):
+        st.write(
+            t(
+                "Complete historical observations were unavailable for at least one selected program, so the model uses an imputed 2024 value. Interpret those program-level estimates with additional caution."
+            )
         )
-        preview = preview.rename(columns={
-            WISH_RANK: "Reference rank",
-            EQUIV_GROUP: "Preference group",
-            PROGRAM: "Program",
-            LOTTERY: "Calculated MTB lottery rank",
-            HASH_PCT: "MTB hash percentile",
-        })
-        with st.expander(t("Calculated MTB percentiles (RUN + RBD)"), expanded=False):
-            st.dataframe(format_display_table(preview), width="stretch", hide_index=True)
-    except MtbEngineError as exc:
-        st.warning(
-            t("MTB preview unavailable: {error}", error=translate_engine_error(exc))
-        )
-    except Exception as exc:
-        st.warning(t("MTB preview unavailable: {error}", error=exc))
 
 # ── Section 3: simulation ─────────────────────────────────────────────
-st.subheader(t("3. Run the simulation"))
+st.subheader(t("3. Review the result"))
 
 if use_equivalence_classes:
     total_orders = count_equivalence_orders(edited)
@@ -634,8 +647,19 @@ if use_equivalence_classes:
         )
 
 calculated_now = False
+can_run_simulation = bool(national_student_id.strip() and selected)
 
-if st.button(t("Calculate unmatched risk"), type="primary"):
+if not national_student_id.strip():
+    st.caption(t("Enter the student's RUN/IPE to unlock the analysis."))
+elif not selected:
+    st.caption(t("Add at least one program to unlock the analysis."))
+
+if st.button(
+    t("Analyze my preference list"),
+    type="primary",
+    disabled=not can_run_simulation,
+    use_container_width=True,
+):
     if not national_student_id.strip():
         st.error(t("Please enter the student's RUN/IPE before running the simulation."))
         st.stop()
@@ -736,5 +760,5 @@ if st.session_state.get(simulation_done_key, False):
         simulation_result_key=simulation_result_key,
     )
 else:
-    st.subheader(t("4. Recommended similar programs"))
-    st.info(t("Run the simulation first to unlock similar-program recommendations."))
+    st.subheader(t("4. Improve the preference list"))
+    st.info(t("Analyze the preference list first to unlock personalized suggestions."))

@@ -7,6 +7,7 @@ recommendations to the wish list" button.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 import numpy as np
@@ -16,9 +17,7 @@ import streamlit as st
 from sae_app.constants import (
     APP_DEBUG,
     EQUIV_GROUP,
-    HARD_UNMATCHED_THRESHOLD,
     PROGRAM,
-    SOFT_UNMATCHED_THRESHOLD,
     WISH_RANK,
 )
 from sae_app.errors import CandidateEvaluationError, MtbEngineError
@@ -50,27 +49,6 @@ from sae_app.wish_list import clean_wish_rows, make_builder_wish_row
 
 LOGGER = logging.getLogger(__name__)
 
-
-def format_recommendation_display(recommendations: pd.DataFrame, visible_columns: list[str]):
-    """Return a color-coded Styler for recommendation rows."""
-    display = format_display_table(recommendations[visible_columns].reset_index(drop=True))
-    colors = recommendations.get("_risk_color", pd.Series(["gray"] * len(recommendations))).reset_index(drop=True)
-
-    def style_row(row):
-        color = colors.iloc[row.name] if row.name < len(colors) else "gray"
-        if color == "green":
-            style = "background-color: #e8f5e9"
-        elif color == "orange":
-            style = "background-color: #fff3e0"
-        elif color == "red":
-            style = "background-color: #ffebee"
-        else:
-            style = ""
-        return [style for _ in row]
-
-    return display.style.apply(style_row, axis=1)
-
-
 def render_similar_program_recommendations(
     edited: pd.DataFrame,
     program_mapping: dict[str, pd.Series],
@@ -83,9 +61,9 @@ def render_similar_program_recommendations(
     simulation_result_key: str | None = None,
 ) -> None:
     """Render the recommendation UI and optionally append selected programs to the wish list."""
-    st.subheader(t("4. Recommended similar programs"))
+    st.subheader(t("4. Improve the preference list"))
 
-    with st.expander(t("Find additional programs similar to the current wish list"), expanded=True):
+    with st.expander(t("Find acceptable additional programs"), expanded=True):
         current_selected_programs = [
             p for p in edited[PROGRAM].dropna().astype(str).str.strip()
             if p and p in program_mapping
@@ -98,32 +76,39 @@ def render_similar_program_recommendations(
         simulation_result = st.session_state.get(simulation_result_key, {}) if simulation_result_key else {}
         current_unmatched_risk = current_unmatched_risk_from_simulation_result(simulation_result)
 
-        st.caption(
-            t("Recommendations combine revealed preferences, proximity, portfolio-risk improvement, and a diversity step to avoid near-duplicates.")
-        )
-        st.caption(
-            t("Proximity uses school-level coordinates when available. Commune and regional coordinates are only soft fallbacks and are never used for hard distance exclusion. To improve precision, add data/commune_coordinates.csv with commune, region, latitude, longitude.")
-        )
-
-        st.markdown(t("#### Portfolio-risk optimization"))
         if np.isfinite(current_unmatched_risk):
             st.metric(t("Current unmatched risk"), f"{current_unmatched_risk:.1%}")
-        st.caption(
-            t(
-                'Each recommended program is evaluated as if it were appended after the current wish list. "Chance if considered" is conditional on the student reaching that wish. The marginal unmatched-risk reduction is the current unmatched risk multiplied by that conditional chance; it is also the estimated final assignment chance for a program appended at the end. Projected unmatched risk is the current risk minus that reduction.'
-            )
-        )
-        st.caption(
-            t("Recommended programs assume no special priority flags for the newly added school. If the student has a sibling, priority-student quota, civil-servant, former-student, or already-enrolled priority for that school, add the program to the list and mark the priority before rerunning the simulation.")
-        )
         st.info(
-            t("Strategic note: adding additional acceptable programs at the end of the wish list does not reduce the student's chance of getting higher-ranked choices. The assignment process considers the list in order and keeps the best available option. Families should therefore add every acceptable backup program, then mark any applicable priority for those added schools and rerun the simulation.")
+            t("Adding an acceptable program at the end does not reduce the chance of receiving a higher-ranked preference. After adding programs, verify priorities and analyze the list again.")
         )
 
-        st.markdown(t("#### Home address for distance calculation"))
+        with st.expander(t("How are these programs selected?"), expanded=False):
+            st.write(
+                t(
+                    "Suggestions combine similarity to the current list, approximate proximity, historical demand, estimated admission access and diversity between recommendations."
+                )
+            )
+            st.write(
+                t(
+                    "Each suggestion is evaluated as if it were added at the end of the list and without any special priority. Adding it higher or declaring a real priority can change the result."
+                )
+            )
+            st.caption(
+                t(
+                    "Distances are straight-line estimates. School coordinates are preferred; commune and regional locations are approximate fallbacks."
+                )
+            )
+
+        st.markdown(t("#### Improve distance estimates — optional"))
         st.caption(
-            t("Enter an address, then click the button to compute recommendation distances from home instead of the current wish-list centroid.")
+            t("Enter a home address to measure distance from home. Otherwise, distance is estimated from the current preference list.")
         )
+        with st.popover(t("Address privacy and precision")):
+            st.write(
+                t(
+                    "The address is sent to OpenStreetMap/Nominatim only after the family clicks the geocoding button. Distances remain approximate and do not represent travel time."
+                )
+            )
         # Keep recommendation/address state outside the wish-editor namespace.
         # clear_wish_editor_widget_state(editor_widget_key_base) deletes every
         # key starting with editor_widget_key_base after wish-list edits; using
@@ -223,13 +208,14 @@ def render_similar_program_recommendations(
                     )
                 )
 
-        rec_max = st.slider(
-            t("Number of recommendations"),
-            min_value=2,
-            max_value=10,
-            value=5,
-            step=1,
-        )
+        with st.expander(t("Recommendation display settings"), expanded=False):
+            rec_max = st.slider(
+                t("Number of recommendations"),
+                min_value=2,
+                max_value=10,
+                value=5,
+                step=1,
+            )
 
         # Recommendation behavior is intentionally hidden from families.
         # Tune these constants in sae_app/recommendations.py if needed:
@@ -247,7 +233,7 @@ def render_similar_program_recommendations(
         diversity_strength = RECOMMENDATION_DIVERSITY_STRENGTH if diversify else 0.0
 
         try:
-            recommendations, _profile_table = recommend_similar_programs(
+            recommendations, profile_table = recommend_similar_programs(
                 edited,
                 program_mapping,
                 student_id=student_id,
@@ -362,44 +348,114 @@ def render_similar_program_recommendations(
             if home_geo_reference
             else "Straight-line distance from current list (km)"
         )
-        visible_columns = [
-            "School",
-            "Commune",
-            "Region",
-            "Program details",
-            distance_column,
-            "Chance if considered",
-            "Recommendation score",
-            "Capacity",
-            "Applicants / seat",
-            "Estimated MTB rank",
-        ]
         st.caption(
-            t("Distances are straight-line estimates. They do not represent road distance, travel time, or actual accessibility.")
-        )
-        st.dataframe(
-            format_recommendation_display(recommendations, visible_columns),
-            width="stretch",
-            hide_index=True,
-        )
-        st.caption(
-            t(
-                "Row colors reflect the projected unmatched risk after appending the program: green below the soft threshold ({soft:.1%}), orange between the soft and hard thresholds, and red at or above the hard threshold ({hard:.1%}).",
-                soft=SOFT_UNMATCHED_THRESHOLD,
-                hard=HARD_UNMATCHED_THRESHOLD,
-            )
-        )
-        st.caption(
-            t("Portfolio-risk estimates are marginal: they assume the program is appended after the current list. Reordering it higher would change final probabilities and should be tested by adding it to the wish list and rerunning the simulation.")
+            t("Select only programs the family would genuinely accept. Recommendations are options to investigate, not automatic choices.")
         )
 
-        programs_to_add = st.multiselect(
-            t("Add recommended programs to the wish list"),
-            options=recommendations[PROGRAM].tolist(),
-            default=[],
-        )
+        programs_to_add = []
+        for _, recommendation in recommendations.iterrows():
+            program_label = str(recommendation.get(PROGRAM, "")).strip()
+            row_key = hashlib.md5(program_label.encode("utf-8")).hexdigest()[:10]
+            school = str(recommendation.get("School", "")).strip()
+            commune = str(recommendation.get("Commune", "")).strip()
+            region = str(recommendation.get("Region", "")).strip()
+            program_details = str(recommendation.get("Program details", "")).strip()
+            distance = recommendation.get(distance_column, "")
+            chance_if_considered = str(recommendation.get("Chance if considered", "")).strip()
+            projected_risk = str(
+                recommendation.get("Projected unmatched risk after append", "")
+            ).strip()
+            risk_color = str(recommendation.get("_risk_color", "gray")).strip()
 
-        if st.button(t("Add selected recommendations"), disabled=not programs_to_add):
+            with st.container(border=True):
+                st.markdown(f"### {school}")
+                location_parts = [part for part in [commune, region] if part]
+                if location_parts:
+                    st.caption(" · ".join(location_parts))
+                if program_details:
+                    st.write(program_details)
+
+                if distance != "" and not pd.isna(distance):
+                    st.caption(
+                        t(
+                            "Approximate straight-line distance: {distance:.1f} km",
+                            distance=float(distance),
+                        )
+                    )
+
+                if np.isfinite(current_unmatched_risk) and projected_risk:
+                    impact_message = t(
+                        "If appended at the end: estimated unmatched risk {current:.1%} → {projected}",
+                        current=current_unmatched_risk,
+                        projected=projected_risk,
+                    )
+                    if risk_color == "green":
+                        st.success(impact_message)
+                    elif risk_color == "orange":
+                        st.warning(impact_message)
+                    elif risk_color == "red":
+                        st.error(impact_message)
+                    else:
+                        st.info(impact_message)
+
+                if chance_if_considered:
+                    st.write(
+                        t(
+                            "Estimated chance if the student reaches this preference: **{chance}**",
+                            chance=chance_if_considered,
+                        )
+                    )
+
+                st.caption(
+                    t(
+                        "Why it appears: it balances similarity to the current list, proximity and estimated risk reduction."
+                    )
+                )
+
+                with st.popover(t("View calculation details")):
+                    st.markdown(
+                        f"**{t('Capacity')}:** {recommendation.get('Capacity', t('No information'))}"
+                    )
+                    st.markdown(
+                        f"**{t('Applicants / seat')}:** {recommendation.get('Applicants / seat', t('No information'))}"
+                    )
+                    st.markdown(
+                        f"**{t('Estimated MTB rank')}:** {recommendation.get('Estimated MTB rank', t('No information'))}"
+                    )
+                    st.caption(
+                        t(
+                            "This estimate assumes the program is appended at the end and no special priority is declared."
+                        )
+                    )
+
+                if st.checkbox(
+                    t("Add this program to the end of my list"),
+                    key=f"{recommendation_widget_key_base}_select_{row_key}",
+                ):
+                    programs_to_add.append(program_label)
+
+        if isinstance(profile_table, pd.DataFrame) and not profile_table.empty:
+            with st.expander(t("Why do these suggestions match the current list?"), expanded=False):
+                st.write(
+                    t(
+                        "The app inferred the following recurring characteristics from the family's current preferences."
+                    )
+                )
+                family_profile = profile_table[
+                    ["Criterion", "Dominant value in current list", "Share", "Coverage"]
+                ].head(6)
+                st.dataframe(
+                    format_display_table(family_profile),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+        if st.button(
+            t("Add selected programs and review my list"),
+            disabled=not programs_to_add,
+            type="primary",
+            use_container_width=True,
+        ):
             non_empty = edited.copy()
             non_empty[PROGRAM] = non_empty[PROGRAM].fillna("").astype(str).str.strip()
             non_empty = non_empty[non_empty[PROGRAM] != ""].copy()
@@ -444,6 +500,7 @@ def render_similar_program_recommendations(
                     ignore_index=True,
                 )
                 st.session_state[editor_state_key] = clean_wish_rows(updated_wishes)
+                st.session_state["recommendations_added_notice"] = len(rows_to_add)
                 invalidate_simulation_state(
                     simulation_done_key=simulation_done_key,
                     simulation_result_key=simulation_result_key,
