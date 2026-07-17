@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import io
 import re
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -127,12 +126,6 @@ def read_csv(file_bytes: bytes, sep: str = "auto") -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes), **kwargs)
     df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
     return df
-
-
-def read_csv_path(path: Path, sep: str = "auto") -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Required data file not found: {path}")
-    return read_csv(path.read_bytes(), sep=sep)
 
 
 def first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
