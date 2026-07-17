@@ -28,12 +28,9 @@ IMPUT_METHOD = "calibration_2024_imputation_method"
 
 PRIORITY_STUDENT_SEATS = "priority_student_seats"
 
-# Hard-coded unmatched-risk thresholds.
-# Change these values directly in the code if you want another calibration.
-# Hard threshold: if the unmatched risk reaches this level, Unmatched is shown
-# as the first predicted outcome.
-# Soft threshold: if the unmatched risk is between the soft and hard thresholds,
-# Unmatched is shown in the podium as a warning signal, but not forced first.
+# Presentation-only attention thresholds.
+# They control the severity of the family-facing warning and never modify
+# the probability ordering of estimated outcomes.
 HARD_UNMATCHED_THRESHOLD = 0.027   # 2.7%: strong unmatched-risk alert
 SOFT_UNMATCHED_THRESHOLD = 0.004   # 0.4%: lighter podium warning
 MAX_EXACT_EQUIV_PERMUTATIONS = 10000
