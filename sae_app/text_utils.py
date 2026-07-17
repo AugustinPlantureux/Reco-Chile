@@ -8,6 +8,8 @@ import.
 
 from __future__ import annotations
 
+import unicodedata
+
 import numpy as np
 import pandas as pd
 
@@ -33,11 +35,11 @@ def clean_text(
     if lower:
         text = text.lower()
     if strip_accents:
-        for old, new in {
-            "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n",
-            "Á": "a", "É": "e", "Í": "i", "Ó": "o", "Ú": "u", "Ü": "u", "Ñ": "n",
-        }.items():
-            text = text.replace(old, new)
+        text = "".join(
+            character
+            for character in unicodedata.normalize("NFKD", text)
+            if not unicodedata.combining(character)
+        )
     missing = {""} | {str(x).lower() for x in (missing_values or set())}
     if text.lower() in missing:
         return default

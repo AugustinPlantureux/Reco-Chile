@@ -9,7 +9,7 @@ The app estimates the probability of assignment to each program in a student's w
 
 ## Main features
 
-- Build a wish list manually or import it from CSV.
+- Build and reorder a wish list directly in the interface.
 - Search programs by region and school characteristics.
 - Use either a strict ranking or preference equivalence classes.
 - Compute a deterministic MTB lottery percentile for each school from `SHA-256(RUN/IPE + RBD)`.
@@ -17,19 +17,20 @@ The app estimates the probability of assignment to each program in a student's w
 - Estimate each program's availability and final assignment probability.
 - Display the overall unmatched risk and the most likely outcomes.
 - Test every strict ordering compatible with the selected equivalence classes, up to a configurable limit.
-- Recommend similar programs using revealed preferences, geographic proximity, competition, expected risk reduction, and diversity.
+- Recommend similar programs using revealed preferences, geographic proximity, competition, estimated admission safety, and diversity.
 - Geocode an optional Chilean home address and restrict suggestions to a realistic radius.
 - Switch between Spanish and English from the interface.
+- Use progressive, family-facing explanations while keeping MTB ranks, calibration details, and recommendation methodology available on demand.
 
 ## Application workflow
 
-1. Enter the student's RUN or IPE.
-2. Indicate whether the wish list already exists or should be built with filters.
-3. Choose a strict ranking or equivalence classes.
-4. Add programs and mark every applicable priority.
-5. Run the simulation.
-6. Review wish-level probabilities, the unmatched-risk warning, and the most likely outcomes.
-7. Inspect suggested backup programs, add acceptable ones to the end of the list, mark any applicable priority, and rerun the simulation.
+1. Enter the student's RUN or IPE and indicate whether the wish list already exists.
+2. Add programs in the family's genuine order of preference. An optional planning toggle can compare undecided internal orders.
+3. Mark every applicable priority for each establishment and analyze the list.
+4. Review the unmatched-risk estimate, the outcomes ordered by probability, and the short family-facing wish table.
+5. Open the optional detail panels to inspect MTB ranks, calibration inputs, assumptions, or equivalence-order sensitivity.
+6. Inspect suggested backup programs, compare the projected risk after appending each one, and add only acceptable options.
+7. Verify priorities for newly added programs and rerun the analysis.
 
 The guided program search can filter by:
 
@@ -67,7 +68,7 @@ The active priority tier is resolved in this order:
 4. former student;
 5. no priority.
 
-The current implementation retains the priority-student tier only when the calculated lottery rank falls within `floor(15% × capacity)`; otherwise it falls back to the next applicable tier.
+The current implementation retains the priority-student tier only when the calculated lottery rank falls within the program's recorded `priority_student_seats` allocation; otherwise it falls back to the next applicable tier.
 
 The raw percentile is then mapped into the relevant part of the calibrated 2024 priority distribution using the tier's share and cumulative share.
 
@@ -113,13 +114,13 @@ The interface distinguishes between:
 - **Chance if considered:** availability conditional on reaching that wish.
 - **Final chance of assignment:** availability after accounting for every higher-ranked wish.
 
-The current warning thresholds are defined in `sae_app/constants.py`:
+The current attention thresholds are defined in `sae_app/constants.py`:
 
-- `2.7%`: strong unmatched-risk alert;
-- `0.4%` to `2.7%`: moderate warning shown in the outcome podium;
-- below `0.4%`: the podium focuses on school assignments.
+- `2.7%` or above: high attention;
+- `0.4%` to below `2.7%`: moderate attention;
+- below `0.4%`: low attention.
 
-These are presentation thresholds, not official SAE cutoffs.
+These are presentation thresholds, not official SAE cutoffs. They control only the alert message. Estimated outcomes are always ordered by their actual modeled probability, so the alert never changes the likelihood ranking.
 
 ## Equivalence classes
 
@@ -236,24 +237,6 @@ The application expects a `data/` directory next to `app.py`.
 
 At startup, the app checks required columns, core numeric fields, positive lottery populations, and the internal consistency of cumulative priority shares. Programs with mean-imputed 2024 calibration values remain usable but are flagged as less reliable.
 
-## Importing a wish list
-
-The most robust CSV format uses RBD and program code directly:
-
-```csv
-rbd,program_code,preference_number,preference_group,priority_sibling,priority_student,priority_parent_civil_servant,priority_ex_student,priority_already_registered
-1234,5678,1,1,false,false,false,false,false
-2345,6789,2,2,true,false,false,false,false
-```
-
-The importer also accepts:
-
-- `wish_rank` and `program`;
-- `rang_du_voeu` and `programme`;
-- optional equivalence columns named `preference_group`, `equivalence_group`, `equivalence_class`, or `preference_class`.
-
-Boolean priority columns are optional. User-supplied `lottery_number`, `numero_loterie`, or `lottery` columns are deliberately ignored in MTB mode because the app recomputes the rank from the RUN/IPE and RBD.
-
 ## Project structure
 
 ```text
@@ -277,7 +260,7 @@ Reco-Chile/
     ├── ui_recommendations.py      # Recommendation interface
     ├── ui_simulation.py           # Simulation results and sensitivity display
     ├── ui_wish_builder.py         # Interactive wish-list editor
-    └── wish_list.py               # CSV import and equivalence-class handling
+    └── wish_list.py               # Wish-list state and equivalence-class handling
 ```
 
 `app.py` intentionally contains only application orchestration. Calculation logic lives in the focused modules under `sae_app/`, with the core MTB engine kept independent from Streamlit.
