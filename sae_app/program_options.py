@@ -279,8 +279,9 @@ def make_program_option_label(
     return label
 
 
-def build_options(calib: pd.DataFrame) -> tuple[list[str], dict[str, pd.Series]]:
-    options, mapping = [], {}
+def build_program_mapping(calib: pd.DataFrame) -> dict[str, pd.Series]:
+    """Build the ordered display-label to program-row mapping."""
+    mapping: dict[str, pd.Series] = {}
 
     unique_programs = calib.drop_duplicates(["rbd", "program_code"]).copy()
     unique_programs["_region_sort"] = unique_programs[REGION].map(region_sort_index)
@@ -318,10 +319,10 @@ def build_options(calib: pd.DataFrame) -> tuple[list[str], dict[str, pd.Series]]
         if label in seen_labels:
             label = f"{label} · code {str(row['program_code']).strip()}"
         seen_labels.add(label)
-        options.append(label)
         mapping[label] = row
 
-    return options, mapping
+    return mapping
+
 
 
 def filter_program_options(

@@ -223,8 +223,6 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
     # SHA-256 gives a percentile, which is converted into an equivalent
     # lottery rank inside the program-level reference population N_s.
     population = max(round(as_float(program[POP])), 1)
-    pop_label  = POP
-
     lottery  = max(round(as_float(wish.get(LOTTERY, 1), 1)), 1)
     raw_rank = min(lottery, population)
 
@@ -263,7 +261,6 @@ def availability(wish: pd.Series, program: pd.Series) -> dict:
         "capacity":                         capacity,
         "true_applicants_last_year":        true_app,
         "lottery_population_used":          population,
-        "lottery_population_source":        pop_label,
         "raw_lottery_rank":                 raw_rank,
         "lottery_percentile_used":          percentile,
         "priority_effective_percentile":    eff_pct,
@@ -283,7 +280,7 @@ def compute_from_availability_rows(rows: list[dict] | pd.DataFrame) -> pd.DataFr
     choices = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     if choices.empty or "availability_probability" not in choices.columns:
         raise UnknownProgram(
-            "No valid wish could be matched to the program data. Check the imported wish list."
+            "No valid wish could be matched to the program data. Check the current preference list."
         )
     choices["cumulative_unavailable_before_choice"] = (
         (1 - choices["availability_probability"]).cumprod().shift(1).fillna(1)
@@ -337,7 +334,7 @@ def precompute_equivalence_availability(
 
     if not lookup:
         raise UnknownProgram(
-            "No valid wish could be matched to the program data. Check the imported wish list."
+            "No valid wish could be matched to the program data. Check the current preference list."
         )
     return lookup
 
@@ -356,7 +353,7 @@ def compute_equivalence_order_from_precomputed(
         key = wish_availability_cache_key(wish)
         if key not in availability_lookup:
             raise UnknownProgram(
-                "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the imported wish list."
+                "A wish in the equivalence-class test could not be matched to the precomputed availability values. Check the current preference list."
             )
         cached = availability_lookup[key].copy()
         cached["wish_rank"] = int(wish[WISH_RANK])

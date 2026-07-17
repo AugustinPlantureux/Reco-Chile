@@ -44,10 +44,26 @@ def format_choices_table(choices):
         "lottery_number": t("Calculated MTB lottery rank"),
         "priority_tier": t("Priority tier"),
         "capacity": t("Seats"),
-        "true_applicants_last_year": t("True applicants last year"),
+        "true_applicants_last_year": t("Applicants in the historical calibration"),
         "availability_probability": t("Chance if considered"),
         "choice_assignment_probability": t("Final chance of assignment"),
     })
+
+
+def format_family_choices_table(choices):
+    """Return the short table needed for a first reading of the result."""
+    table = choices[["wish_rank", "program", "choice_assignment_probability"]].copy()
+    table["program"] = table["program"].map(display_outcome_label)
+    table["choice_assignment_probability"] = table[
+        "choice_assignment_probability"
+    ].astype(float).map(lambda value: f"{value:.1%}")
+    return table.rename(
+        columns={
+            "wish_rank": t("Preference"),
+            "program": t("Establishment"),
+            "choice_assignment_probability": t("Estimated final chance"),
+        }
+    )
 
 
 def _split_tied_group_orders(value) -> list[list[str]]:
@@ -153,107 +169,81 @@ def _family_order_view(variants_df) -> None:
     )
 
 
+def ordered_estimated_outcomes(choices) -> list[dict[str, str | float]]:
+    """Return all outcomes ordered only by their modeled probability."""
+    p_unmatched = float(choices["cumulative_unavailable_after_choice"].iloc[-1])
+    outcomes = [
+        {
+            "label": display_outcome_label(row["program"]),
+            "probability": float(row["choice_assignment_probability"]),
+        }
+        for _, row in choices.iterrows()
+        if float(row["choice_assignment_probability"]) > 0
+    ]
+    outcomes.append({"label": t("Unmatched"), "probability": p_unmatched})
+    return sorted(outcomes, key=lambda item: item["probability"], reverse=True)
+
+
 def render_single_summary(
     choices,
     hard_threshold: float,
     soft_threshold: float = SOFT_UNMATCHED_THRESHOLD,
 ) -> None:
+    """Render the decision first and keep alert severity separate from likelihood."""
     p_unmatched = float(choices["cumulative_unavailable_after_choice"].iloc[-1])
     hard_at_risk = p_unmatched >= hard_threshold
     soft_at_risk = soft_threshold <= p_unmatched < hard_threshold
 
-    st.subheader(t("Summary"))
-    st.metric(t("Unmatched risk"), f"{p_unmatched:.1%}")
-    st.caption(
-        t(
-            "How to read this: above {hard:.1%}, Unmatched is shown first. Between {soft:.1%} and {hard:.1%}, it is shown in the podium as a warning. Below {soft:.1%}, only schools are shown in the podium.",
-            hard=hard_threshold,
-            soft=soft_threshold,
-        )
-    )
-
-    positive = (
-        choices[choices["choice_assignment_probability"] > 0]
-        .sort_values("choice_assignment_probability", ascending=False)
-        .reset_index(drop=True)
-    )
-
+    st.subheader(t("Result of the preference list"))
+    st.metric(t("Estimated risk of remaining without an assignment"), f"{p_unmatched:.1%}")
     if hard_at_risk:
         st.error(
-            t("Strong unmatched-risk alert: the risk is above the hard threshold. Unmatched is therefore shown as the first outcome. Adding safer options is recommended.")
+            t("High attention level: consider adding more acceptable programs at the end of the list.")
         )
-        if positive.empty:
-            st.markdown(t("**Most likely outcome:**"))
-            st.write(f"1. {t('Unmatched')}")
-        else:
-            st.markdown(t("**Most likely outcomes:**"))
-            st.write(f"1. {t('Unmatched')}")
-            for i, row in positive.head(2).iterrows():
-                st.write(f"{i + 2}. {display_outcome_label(row['program'])}")
-            st.caption(
-                t("The schools listed below Unmatched are still the most likely school assignments, but the unmatched risk is high enough to be treated as the main warning.")
-            )
     elif soft_at_risk:
-        if positive.empty:
-            st.error(t("No listed school appears realistically accessible."))
-            return
-
-        best = positive.iloc[0]
         st.warning(
-            t(
-                "Moderate unmatched-risk warning: the most likely assignment is **{program}**, but the unmatched risk is high enough to appear in the podium.",
-                program=display_outcome_label(best["program"]),
-            )
-        )
-
-        podium = [
-            {
-                "label": display_outcome_label(row["program"]),
-                "probability": float(row["choice_assignment_probability"]),
-                "is_unmatched": False,
-            }
-            for _, row in positive.iterrows()
-        ]
-        podium.append({
-            "label": "Unmatched",
-            "probability": p_unmatched,
-            "is_unmatched": True,
-        })
-        podium = sorted(podium, key=lambda x: x["probability"], reverse=True)
-        top3 = podium[:3]
-
-        if not any(item["is_unmatched"] for item in top3):
-            top3 = top3[:2] + [
-                {
-                    "label": "Unmatched",
-                    "probability": p_unmatched,
-                    "is_unmatched": True,
-                }
-            ]
-
-        st.markdown(t("**Top 3 most likely outcomes:**"))
-        for i, item in enumerate(top3, start=1):
-            st.write(f"{i}. {display_outcome_label(item['label'])}")
-        st.caption(
-            t("Unmatched is included here as a warning signal because the risk is above the soft threshold; it is not forced into first place unless the hard threshold is reached.")
+            t("Moderate attention level: review the list and consider acceptable backup options.")
         )
     else:
-        if positive.empty:
-            st.error(t("No listed school appears realistically accessible."))
-        else:
-            best = positive.iloc[0]
-            st.success(
-                t(
-                    "The student is not flagged as at risk. The most likely assignment is: **{program}**.",
-                    program=display_outcome_label(best["program"]),
-                )
+        st.success(t("Low attention level under the tool's current alert settings."))
+
+    st.caption(
+        t(
+            "This percentage is an estimate based on historical data and model assumptions; it is not an official SAE result or guarantee."
+        )
+    )
+
+    outcomes = ordered_estimated_outcomes(choices)
+
+    st.markdown(t("#### Most likely estimated outcomes"))
+    for position, item in enumerate(outcomes[:4], start=1):
+        st.markdown(f"{position}. **{item['label']}** — {item['probability']:.1%}")
+
+    if len(outcomes) > 4:
+        with st.expander(t("Show all estimated outcomes"), expanded=False):
+            for position, item in enumerate(outcomes, start=1):
+                st.write(f"{position}. {item['label']} — {item['probability']:.1%}")
+
+    with st.popover(t("How should I interpret these percentages?")):
+        st.write(
+            t(
+                "Outcomes are always ordered by their estimated probability. The attention alert is displayed separately and never changes this ranking."
             )
-            st.caption(
-                t("The unmatched risk is below the soft threshold, so the podium focuses on school assignments only.")
+        )
+        st.write(
+            t(
+                "A program's final chance accounts for every program placed above it. The unmatched risk is the estimated chance that none of the listed programs is available."
             )
-            st.markdown(t("**Top 3 most likely schools:**"))
-            for i, row in positive.head(3).iterrows():
-                st.write(f"{i + 1}. {display_outcome_label(row['program'])}")
+        )
+
+    with st.expander(t("How are the attention levels defined?"), expanded=False):
+        st.write(
+            t(
+                "These are presentation thresholds defined by this research tool, not official SAE thresholds. Low is below {soft:.1%}; moderate is from {soft:.1%} to below {hard:.1%}; high is {hard:.1%} or above.",
+                soft=soft_threshold,
+                hard=hard_threshold,
+            )
+        )
 
 
 def render_simulation_result(result: dict) -> None:
@@ -277,14 +267,9 @@ def render_simulation_result(result: dict) -> None:
         if reference_choices is None or variants_df is None or len(variants_df) == 0:
             return
 
-        st.subheader(t("Reference strict-order details"))
-        st.caption(
-            t("This table shows one reference order: the current row order inside each preference group. The sensitivity test below then checks every strict order that is compatible with the groups. This matters because tied programs can still lead to different predicted schools.")
-        )
-        st.dataframe(format_choices_table(reference_choices), width="stretch", hide_index=True)
         render_single_summary(reference_choices, hard_threshold_used, soft_threshold_used)
 
-        st.subheader(t("Equivalence-class sensitivity"))
+        st.subheader(t("Does the undecided internal order matter?"))
 
         predicted_chance_values = []
         if "Predicted outcome final chance" in variants_df.columns:
@@ -306,7 +291,7 @@ def render_simulation_result(result: dict) -> None:
             and predicted_chance_range >= EQUIV_PROBABILITY_CHANGE_WARNING_THRESHOLD
         )
 
-        if len(distinct_outcomes) == 1 and same_outcome_but_probability_changes:
+        if same_outcome_but_probability_changes:
             st.warning(
                 t(
                     "The strict ordering inside the equivalence classes does not change the most likely school: **{outcome}**. However, it changes the final assignment probability for that school, from {min_chance:.1%} to {max_chance:.1%} across compatible strict order(s).",
@@ -340,6 +325,12 @@ def render_simulation_result(result: dict) -> None:
         if len(distinct_outcomes) > 1 or same_outcome_but_probability_changes:
             _family_order_view(variants_df)
 
+        with st.expander(t("Detailed calculation for the reference order"), expanded=False):
+            st.caption(
+                t("This reference uses the current row order inside each preference group.")
+            )
+            st.dataframe(format_choices_table(reference_choices), width="stretch", hide_index=True)
+
         with st.expander(t("Technical details of all tested orders"), expanded=False):
             st.caption(
                 t(
@@ -363,9 +354,25 @@ def render_simulation_result(result: dict) -> None:
     if choices is None:
         return
 
-    st.subheader(t("Wish-level details"))
-    st.caption(
-        t("Chance if considered is the chance of getting that program if the student reaches that wish. Final chance of assignment also accounts for all higher-ranked wishes. For example, a school can be accessible if considered, but have a lower final chance if the student is likely to get a higher-ranked option first.")
-    )
-    st.dataframe(format_choices_table(choices), width="stretch", hide_index=True)
     render_single_summary(choices, hard_threshold_used, soft_threshold_used)
+
+    st.subheader(t("Estimated final chance by preference"))
+    st.caption(
+        t("The final chance accounts for every program placed above each preference.")
+    )
+    st.dataframe(format_family_choices_table(choices), width="stretch", hide_index=True)
+
+    with st.popover(t("Chance if considered vs. final chance")):
+        st.write(
+            t(
+                "Chance if considered estimates access to a program if the student reaches that preference. Final chance also accounts for the possibility of receiving a higher-ranked program first."
+            )
+        )
+
+    with st.expander(t("See the detailed calculation for each preference"), expanded=False):
+        st.dataframe(format_choices_table(choices), width="stretch", hide_index=True)
+        st.caption(
+            t(
+                "MTB ranks, priority tiers, seats and historical applicant counts are calculation details. They should not be interpreted as official SAE results."
+            )
+        )

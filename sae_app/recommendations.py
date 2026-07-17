@@ -82,7 +82,7 @@ RECOMMENDATION_RISK_OPTIMIZATION_WEIGHT = 2.25
 # Minimum revealed-preference similarity required in normal mode.
 # If the current wish list contains no usable similarity signal, this threshold
 # is not applied and the UI explicitly warns that recommendations are based
-# mainly on proximity and admission-risk reduction.
+# mainly on proximity and estimated admission safety.
 RECOMMENDATION_MIN_SIMILARITY_SCORE = 0.12
 RECOMMENDATION_PROXIMITY_WEIGHT = 0.75
 RECOMMENDATION_DISTANCE_SCALE_KM = 50.0
