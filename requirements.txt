@@ -2,3 +2,6 @@ streamlit>=1.30
 pandas>=2.0
 numpy>=1.24
 scipy>=1.10
+# Only required if SAE_USE_DUCKDB=true (see sae_app/constants.py). The default
+# pandas data-loading backend does not import duckdb at all.
+duckdb>=1.0

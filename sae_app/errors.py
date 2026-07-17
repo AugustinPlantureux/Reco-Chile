@@ -33,3 +33,12 @@ class CandidateEvaluationError(ValueError):
 
     Unexpected programming errors must not be wrapped in this exception.
     """
+
+
+class DataSchemaError(ValueError):
+    """Raised when an input CSV is readable but structurally unsafe to use.
+
+    Shared by both sae_app.data_loading_pandas and sae_app.data_loading_duckdb
+    so callers can catch one exception type regardless of which loader
+    implementation is active.
+    """
