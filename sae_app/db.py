@@ -21,6 +21,8 @@ from typing import Callable
 import duckdb
 import pandas as pd
 
+from sae_app.errors import DataSchemaError
+
 
 def quote_ident(name: str) -> str:
     """Quote a SQL identifier, escaping embedded double-quotes.
@@ -139,13 +141,7 @@ def normalize_required_code_column(
     field_name: str,
     source_name: str,
 ) -> pd.Series:
-    """Normalize a required positive-integer identifier column, or raise DataSchemaError.
-
-    Deferred-imports DataSchemaError from data_loading to avoid a circular
-    import (data_loading imports this module at the top level).
-    """
-    from sae_app.data_loading import DataSchemaError
-
+    """Normalize a required positive-integer identifier column, or raise DataSchemaError."""
     working = df[[column]].reset_index(drop=True).copy()
     working["_row_order"] = range(len(working))
     register_df(con, "_normalize_src", working)
@@ -193,8 +189,6 @@ def drop_exact_duplicates_or_raise_conflicts(
     *,
     source_name: str,
 ) -> pd.DataFrame:
-    from sae_app.data_loading import DataSchemaError
-
     if not df.duplicated(key_columns, keep=False).any():
         return as_object_dtype(df)
 

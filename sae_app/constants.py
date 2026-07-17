@@ -6,10 +6,21 @@ It only defines names and values that the rest of the app agrees on.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # Set to True during local development to display full Python tracebacks.
 APP_DEBUG = False
+
+# Selects the data-loading/validation backend in sae_app/data_loading.py:
+# False (default) -> sae_app.data_loading_pandas, the original pandas
+#   implementation. Byte-for-byte the same behavior as before DuckDB was
+#   introduced, and does not require the duckdb package to be installed.
+# True -> sae_app.data_loading_duckdb, which runs the same joins/validation
+#   as SQL through DuckDB.
+# Overridable via the SAE_USE_DUCKDB environment variable so this can be
+# toggled per-deployment without a code change.
+USE_DUCKDB = os.environ.get("SAE_USE_DUCKDB", "false").strip().lower() in {"1", "true", "yes"}
 
 # ---------------------------------------------------------------------------
 # Data columns
