@@ -22,6 +22,18 @@ import duckdb
 import pandas as pd
 
 
+def quote_ident(name: str) -> str:
+    """Quote a SQL identifier, escaping embedded double-quotes.
+
+    Column names in this codebase always come from fixed, trusted repo-path
+    CSV headers, never from user-uploaded content -- but every function here
+    is generic, reusable infrastructure, so identifiers are still escaped
+    rather than interpolated raw. Without this, a column name containing a
+    literal `"` would break out of the quoted-identifier context.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
 def connect() -> duckdb.DuckDBPyConnection:
     """Return a fresh in-memory DuckDB connection.
 
@@ -40,11 +52,37 @@ def as_object_dtype(df: pd.DataFrame) -> pd.DataFrame:
     Series.equals(), used in caching/testing -- expects plain 'object' dtype
     for text columns, matching pre-DuckDB pandas behavior; values are
     unaffected, only the column's dtype label.
+
+    Never mutates its input: copies first if there is anything to convert, and
+    returns the input untouched (no copy) otherwise. A caller that hands this
+    a DataFrame it still holds a reference to -- e.g.
+    drop_exact_duplicates_or_raise_conflicts's no-duplicates fast path -- must
+    never see it mutated in place.
     """
-    for col in df.columns:
-        if isinstance(df[col].dtype, pd.StringDtype):
-            df[col] = df[col].astype(object)
+    string_cols = [c for c in df.columns if isinstance(df[c].dtype, pd.StringDtype)]
+    if not string_cols:
+        return df
+    df = df.copy()
+    for col in string_cols:
+        df[col] = df[col].astype(object)
     return df
+
+
+def register_df(con: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
+    """Register a DataFrame, giving DuckDB a reliable type for empty text columns.
+
+    DuckDB infers a registered column's SQL type by sampling values; an
+    object-dtype column with zero rows has nothing to sample, so DuckDB
+    silently infers INTEGER instead of VARCHAR. Casting object columns to
+    pandas' typed StringDtype first (values unaffected) gives DuckDB a real
+    type hint even when the column is empty. Every DataFrame registration in
+    this module should go through here instead of calling con.register directly.
+    """
+    typed = df.copy()
+    for col in typed.columns:
+        if typed[col].dtype == object:
+            typed[col] = typed[col].astype("string")
+    con.register(name, typed)
 
 
 def register_text_udf(
@@ -54,8 +92,18 @@ def register_text_udf(
     *,
     arg_types: list[str],
 ) -> None:
-    """Register a Python string-formatting function as a scalar SQL function."""
-    con.create_function(name, func, arg_types, "VARCHAR")
+    """Register a Python string-formatting function as a scalar SQL function.
+
+    Uses null_handling="special" so DuckDB always calls `func`, including on
+    NULL input, matching the old pandas .map() behavior these UDFs replace --
+    by default DuckDB short-circuits NULL arguments and never calls the
+    Python function at all, which is a different (and for these particular
+    functions, wrong) contract: compact_program_name/compact_school_name/
+    title_case_udf each have their own explicit blank/NaN handling that must
+    run to produce the same sentinel values (e.g. UNKNOWN_PROGRAM_NAME) as
+    before.
+    """
+    con.create_function(name, func, arg_types, "VARCHAR", null_handling="special")
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +116,10 @@ def register_text_udf(
 
 _CODE_MATCH_CASE = """
     CASE
-        WHEN regexp_matches(trim("{col}"), '^="[0-9]+([.,]0+)?"$')
-            THEN regexp_extract(trim("{col}"), '^="([0-9]+)([.,]0+)?"$', 1)
-        WHEN regexp_matches(trim("{col}"), '^[0-9]+([.,]0+)?$')
-            THEN regexp_extract(trim("{col}"), '^([0-9]+)([.,]0+)?$', 1)
+        WHEN regexp_matches(trim({col}), '^="\\s*[0-9]+([.,]0+)?\\s*"$')
+            THEN regexp_extract(trim({col}), '^="\\s*([0-9]+)([.,]0+)?\\s*"$', 1)
+        WHEN regexp_matches(trim({col}), '^[0-9]+([.,]0+)?$')
+            THEN regexp_extract(trim({col}), '^([0-9]+)([.,]0+)?$', 1)
         ELSE NULL
     END
 """
@@ -79,7 +127,7 @@ _CODE_MATCH_CASE = """
 
 def normalized_code_expr(column: str) -> str:
     """Return a SQL expression yielding the normalized code or NULL if invalid."""
-    digits = _CODE_MATCH_CASE.format(col=column)
+    digits = _CODE_MATCH_CASE.format(col=quote_ident(column))
     return f"CASE WHEN ({digits}) IS NULL THEN NULL ELSE NULLIF(ltrim({digits}, '0'), '') END"
 
 
@@ -98,13 +146,17 @@ def normalize_required_code_column(
     """
     from sae_app.data_loading import DataSchemaError
 
-    con.register("_normalize_src", df[[column]].reset_index(drop=True))
+    working = df[[column]].reset_index(drop=True).copy()
+    working["_row_order"] = range(len(working))
+    register_df(con, "_normalize_src", working)
     query = f"""
         SELECT
-            ROW_NUMBER() OVER () + 1 AS csv_row,
+            _row_order,
+            ROW_NUMBER() OVER (ORDER BY _row_order) + 1 AS csv_row,
             "{column}" AS raw_value,
             {normalized_code_expr(column)} AS normalized_code
         FROM _normalize_src
+        ORDER BY _row_order
     """
     result = con.sql(query).df()
     con.unregister("_normalize_src")
@@ -149,28 +201,40 @@ def drop_exact_duplicates_or_raise_conflicts(
     value_columns = [c for c in df.columns if c not in key_columns]
     working = df.reset_index(drop=True).copy()
     working["_orig_order"] = range(len(working))
-    con.register("_dedupe_src", working)
+    register_df(con, "_dedupe_src", working)
 
-    key_list = ", ".join(f'"{c}"' for c in key_columns)
+    key_list = ", ".join(quote_ident(c) for c in key_columns)
     norm_value_cols = ", ".join(
-        f"""regexp_replace(trim(coalesce(CAST("{c}" AS VARCHAR), '')), '\\s+', ' ', 'g') AS "{c}_norm\""""
+        f"regexp_replace(trim(coalesce(CAST({quote_ident(c)} AS VARCHAR), '')), '\\s+', ' ', 'g') "
+        f"AS {quote_ident(c + '_norm')}"
         for c in value_columns
     )
-    norm_value_col_names = ", ".join(f'"{c}_norm"' for c in value_columns) if value_columns else "NULL"
+    norm_value_col_names = ", ".join(quote_ident(c + "_norm") for c in value_columns) if value_columns else "NULL"
 
     conflict_sql = f"""
         WITH normalized AS (
-            SELECT {key_list}{"," if value_columns else ""} {norm_value_cols}
+            SELECT {key_list}, _orig_order{"," if value_columns else ""} {norm_value_cols}
             FROM _dedupe_src
         ),
         distinct_combos AS (
             SELECT DISTINCT {key_list}{"," if value_columns else ""} {norm_value_col_names}
             FROM normalized
+        ),
+        conflict_counts AS (
+            SELECT {key_list}, COUNT(*) AS distinct_count
+            FROM distinct_combos
+            GROUP BY {key_list}
+            HAVING COUNT(*) > 1
+        ),
+        first_seen AS (
+            SELECT {key_list}, MIN(_orig_order) AS first_seen
+            FROM normalized
+            GROUP BY {key_list}
         )
-        SELECT {key_list}, COUNT(*) AS distinct_count
-        FROM distinct_combos
-        GROUP BY {key_list}
-        HAVING COUNT(*) > 1
+        SELECT conflict_counts.*
+        FROM conflict_counts
+        JOIN first_seen USING ({key_list})
+        ORDER BY first_seen.first_seen
     """
     conflicts = con.sql(conflict_sql).df()
 
@@ -219,15 +283,26 @@ def left_join_preserving_order(
     """
     left = left_df.reset_index(drop=True).copy()
     left["_row_order"] = range(len(left))
-    con.register("_ljl", left)
-    con.register("_ljr", right_df)
 
-    on_list = ", ".join(f'"{c}"' for c in on)
+    on_list = ", ".join(quote_ident(c) for c in on)
     right_extra_cols = [c for c in right_df.columns if c not in on]
     left_cols = [c for c in left.columns if c != "_row_order"]
-    select_list = ", ".join(f'_ljl."{c}"' for c in left_cols)
+
+    colliding = sorted(set(right_extra_cols) & set(left_cols))
+    if colliding:
+        raise ValueError(
+            f"left_join_preserving_order: right_df has non-key column(s) {colliding} "
+            "that also exist in left_df. DuckDB would silently rename the collision "
+            "(e.g. to 'col_1') rather than raise, which would silently drop the right "
+            "column from the caller's view. Rename the colliding column(s) before "
+            "calling, or drop them from one side first."
+        )
+
+    register_df(con, "_ljl", left)
+    register_df(con, "_ljr", right_df)
+    select_list = ", ".join(f"_ljl.{quote_ident(c)}" for c in left_cols)
     if right_extra_cols:
-        select_list += ", " + ", ".join(f'_ljr."{c}"' for c in right_extra_cols)
+        select_list += ", " + ", ".join(f"_ljr.{quote_ident(c)}" for c in right_extra_cols)
 
     query = f"""
         SELECT {select_list}
@@ -264,7 +339,7 @@ def register_haversine_km(con: duckdb.DuckDBPyConnection) -> None:
 
 def parse_coordinate_expr(column: str) -> str:
     """SQL expression parsing a possibly comma-decimal coordinate to a finite DOUBLE or NULL."""
-    cleaned = f"""try_cast(replace(trim(CAST("{column}" AS VARCHAR)), ',', '.') AS DOUBLE)"""
+    cleaned = f"try_cast(replace(trim(CAST({quote_ident(column)} AS VARCHAR)), ',', '.') AS DOUBLE)"
     return f"(CASE WHEN {cleaned} IS NOT NULL AND isfinite({cleaned}) THEN {cleaned} ELSE NULL END)"
 
 
@@ -303,7 +378,7 @@ def coalesce_program_coordinates(
 
     working = df.reset_index(drop=True).copy()
     working["_row_order"] = range(len(working))
-    con.register("_coord_src", working)
+    register_df(con, "_coord_src", working)
 
     if not available:
         query = f"""
@@ -357,7 +432,7 @@ def rbd_coordinate_spread_km(
     register_haversine_km(con)
     working = df.reset_index(drop=True).copy()
     working["_row_order"] = range(len(working))
-    con.register("_spread_src", working)
+    register_df(con, "_spread_src", working)
 
     query = f"""
         WITH valid_points AS (

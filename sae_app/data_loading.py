@@ -76,13 +76,10 @@ def _normalize_required_code_series(
     can only produce a DataSchemaError.
     """
     frame = pd.DataFrame({"value": values.reset_index(drop=True)})
-    con = db.connect()
-    try:
+    with db.connect() as con:
         normalized = db.normalize_required_code_column(
             con, frame, "value", field_name=field_name, source_name=source_name,
         )
-    finally:
-        con.close()
     return pd.Series(normalized.tolist(), index=values.index, dtype="object")
 
 
@@ -129,13 +126,10 @@ def _drop_exact_duplicates_or_raise_conflicts(
     ignored; any meaningful difference in the retained columns is reported
     before deduplication.
     """
-    con = db.connect()
-    try:
+    with db.connect() as con:
         return db.drop_exact_duplicates_or_raise_conflicts(
             con, df, key_columns, source_name=source_name,
         )
-    finally:
-        con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +185,8 @@ def attach_regions(
     out["rbd"] = norm_code(out["rbd"])
 
     regions = load_rbd_region_map(region_file_bytes)
-    con = db.connect()
-    try:
+    with db.connect() as con:
         out = db.left_join_preserving_order(con, out, regions, on=["rbd"])
-    finally:
-        con.close()
     out[REGION] = out[REGION].fillna(UNKNOWN_REGION)
     return out
 
@@ -274,11 +265,8 @@ def attach_program_filters(
     out["program_code"] = norm_code(out["program_code"])
 
     filters = load_program_filters(filter_file_bytes)
-    con = db.connect()
-    try:
+    with db.connect() as con:
         out = db.left_join_preserving_order(con, out, filters, on=["rbd", "program_code"])
-    finally:
-        con.close()
 
     for col in [
         PROGRAM_TRACK,
@@ -536,96 +524,96 @@ def load_program_names(file_bytes: bytes) -> pd.DataFrame:
     if missing:
         raise DataSchemaError(f"{PROGRAM_NAMES_PATH.name} is missing columns: " + ", ".join(sorted(missing)))
 
-    con = db.connect()
-    db.register_text_udf(con, "compact_program_name_udf", compact_program_name, arg_types=["VARCHAR"])
-    db.register_text_udf(con, "compact_school_name_udf", compact_school_name, arg_types=["VARCHAR"])
-    db.register_text_udf(
-        con, "title_case_udf",
-        lambda x: "" if x is None else str(x).strip().title(),
-        arg_types=["VARCHAR"],
-    )
-    db.register_text_udf(
-        con, "translate_filter_value_udf",
-        lambda value, target_column: translate_filter_value(value, target_column),
-        arg_types=["VARCHAR", "VARCHAR"],
-    )
+    with db.connect() as con:
+        db.register_text_udf(con, "compact_program_name_udf", compact_program_name, arg_types=["VARCHAR"])
+        db.register_text_udf(con, "compact_school_name_udf", compact_school_name, arg_types=["VARCHAR"])
+        db.register_text_udf(
+            con, "title_case_udf",
+            lambda x: "" if x is None else str(x).strip().title(),
+            arg_types=["VARCHAR"],
+        )
+        db.register_text_udf(
+            con, "translate_filter_value_udf",
+            lambda value, target_column: translate_filter_value(value, target_column),
+            arg_types=["VARCHAR", "VARCHAR"],
+        )
 
-    working = df.reset_index(drop=True).copy()
-    working["rbd"] = db.normalize_required_code_column(
-        con, working, "rbd", field_name="rbd", source_name=PROGRAM_NAMES_PATH.name,
-    )
-    working["program_code"] = db.normalize_required_code_column(
-        con, working, "program_code", field_name="program_code", source_name=PROGRAM_NAMES_PATH.name,
-    )
+        working = df.reset_index(drop=True).copy()
+        working["rbd"] = db.normalize_required_code_column(
+            con, working, "rbd", field_name="rbd", source_name=PROGRAM_NAMES_PATH.name,
+        )
+        working["program_code"] = db.normalize_required_code_column(
+            con, working, "program_code", field_name="program_code", source_name=PROGRAM_NAMES_PATH.name,
+        )
 
-    # Distinct internal names: several PROGRAM_COORDINATE_COLUMN_PAIRS candidates
-    # (e.g. program_latitude/program_longitude) share a name with the final
-    # output column, which the closing explicit SELECT resolves by never
-    # passing raw columns through with `SELECT *`.
-    working = db.coalesce_program_coordinates(
-        con, working, PROGRAM_COORDINATE_COLUMN_PAIRS,
-        latitude_out="_coalesced_latitude",
-        longitude_out="_coalesced_longitude",
-        source_out="_coalesced_source",
-    )
-    working = db.rbd_coordinate_spread_km(
-        con, working,
-        rbd_column="rbd",
-        latitude_column="_coalesced_latitude",
-        longitude_column="_coalesced_longitude",
-        source_column="_coalesced_source",
-        school_coordinate_label="school coordinate",
-        output_column="_rbd_spread_km",
-    )
+        # Distinct internal names: several PROGRAM_COORDINATE_COLUMN_PAIRS candidates
+        # (e.g. program_latitude/program_longitude) share a name with the final
+        # output column, which the closing explicit SELECT resolves by never
+        # passing raw columns through with `SELECT *`.
+        working = db.coalesce_program_coordinates(
+            con, working, PROGRAM_COORDINATE_COLUMN_PAIRS,
+            latitude_out="_coalesced_latitude",
+            longitude_out="_coalesced_longitude",
+            source_out="_coalesced_source",
+        )
+        working = db.rbd_coordinate_spread_km(
+            con, working,
+            rbd_column="rbd",
+            latitude_column="_coalesced_latitude",
+            longitude_column="_coalesced_longitude",
+            source_column="_coalesced_source",
+            school_coordinate_label="school coordinate",
+            output_column="_rbd_spread_km",
+        )
 
-    con.register("_names_src", working)
+        db.register_df(con, "_names_src", working)
 
-    criteria_sources = {
-        PROGRAM_RURALITY: "ruralite",
-        PROGRAM_PIE: "convenio_pie",
-        PROGRAM_PACE: "pace",
-        PROGRAM_ENROLLMENT_FEE: "paiement_matricula",
-        PROGRAM_MONTHLY_FEE: "paiement_mensualite",
-        PROGRAM_RELIGIOUS_ORIENTATION: "orientation_religieuse",
-    }
-    criteria_select = [
-        f"""translate_filter_value_udf("{source_col}", '{target_col}') AS "{target_col}\""""
-        if source_col in df.columns
-        else f"""'No information' AS "{target_col}\""""
-        for target_col, source_col in criteria_sources.items()
-    ]
+        criteria_sources = {
+            PROGRAM_RURALITY: "ruralite",
+            PROGRAM_PIE: "convenio_pie",
+            PROGRAM_PACE: "pace",
+            PROGRAM_ENROLLMENT_FEE: "paiement_matricula",
+            PROGRAM_MONTHLY_FEE: "paiement_mensualite",
+            PROGRAM_RELIGIOUS_ORIENTATION: "orientation_religieuse",
+        }
+        criteria_select = [
+            f"""translate_filter_value_udf("{source_col}", '{target_col}') AS "{target_col}\""""
+            if source_col in df.columns
+            else f"""'No information' AS "{target_col}\""""
+            for target_col, source_col in criteria_sources.items()
+        ]
 
-    school_commune_expr = "title_case_udf(commune)" if "commune" in df.columns else "''"
-    empty_quoted = "''"
-    geo_match_level_expr = (
-        f'coalesce(trim(CAST("{PROGRAM_GEO_MATCH_LEVEL}" AS VARCHAR)), {empty_quoted})'
-        if PROGRAM_GEO_MATCH_LEVEL in df.columns
-        else empty_quoted
-    )
-    discrepancy_expr = (
-        _parse_nonnegative_float_expr(COORDINATE_DISCREPANCY_KM)
-        if COORDINATE_DISCREPANCY_KM in df.columns
-        else "CAST(NULL AS DOUBLE)"
-    )
+        school_commune_expr = "title_case_udf(commune)" if "commune" in df.columns else "''"
+        empty_quoted = "''"
+        geo_match_level_expr = (
+            f'coalesce(trim(CAST("{PROGRAM_GEO_MATCH_LEVEL}" AS VARCHAR)), {empty_quoted})'
+            if PROGRAM_GEO_MATCH_LEVEL in df.columns
+            else empty_quoted
+        )
+        discrepancy_expr = (
+            _parse_nonnegative_float_expr(COORDINATE_DISCREPANCY_KM)
+            if COORDINATE_DISCREPANCY_KM in df.columns
+            else "CAST(NULL AS DOUBLE)"
+        )
 
-    query = f"""
-        SELECT
-            rbd,
-            program_code,
-            compact_program_name_udf(nom_programme_reconstruit) AS "{PROGRAM_DISPLAY_NAME}",
-            compact_school_name_udf(nom_lycee) AS "{SCHOOL_NAME}",
-            {school_commune_expr} AS "{SCHOOL_COMMUNE}",
-            _coalesced_latitude AS "{PROGRAM_LATITUDE}",
-            _coalesced_longitude AS "{PROGRAM_LONGITUDE}",
-            _coalesced_source AS "{PROGRAM_COORDINATE_SOURCE}",
-            {geo_match_level_expr} AS "{PROGRAM_GEO_MATCH_LEVEL}",
-            {discrepancy_expr} AS "{COORDINATE_DISCREPANCY_KM}",
-            _rbd_spread_km AS "{RBD_COORDINATE_SPREAD_KM}",
-            {", ".join(criteria_select)}
-        FROM _names_src
-    """
-    out = db.as_object_dtype(con.sql(query).df())
-    con.unregister("_names_src")
+        query = f"""
+            SELECT
+                rbd,
+                program_code,
+                compact_program_name_udf(nom_programme_reconstruit) AS "{PROGRAM_DISPLAY_NAME}",
+                compact_school_name_udf(nom_lycee) AS "{SCHOOL_NAME}",
+                {school_commune_expr} AS "{SCHOOL_COMMUNE}",
+                _coalesced_latitude AS "{PROGRAM_LATITUDE}",
+                _coalesced_longitude AS "{PROGRAM_LONGITUDE}",
+                _coalesced_source AS "{PROGRAM_COORDINATE_SOURCE}",
+                {geo_match_level_expr} AS "{PROGRAM_GEO_MATCH_LEVEL}",
+                {discrepancy_expr} AS "{COORDINATE_DISCREPANCY_KM}",
+                _rbd_spread_km AS "{RBD_COORDINATE_SPREAD_KM}",
+                {", ".join(criteria_select)}
+            FROM _names_src
+        """
+        out = db.as_object_dtype(con.sql(query).df())
+        con.unregister("_names_src")
 
     out = _drop_exact_duplicates_or_raise_conflicts(
         out, ["rbd", "program_code"], source_name=PROGRAM_NAMES_PATH.name
@@ -645,11 +633,8 @@ def attach_program_names(
     if program_names_file_bytes is None:
         program_names_file_bytes = PROGRAM_NAMES_PATH.read_bytes()
     names = load_program_names(program_names_file_bytes)
-    con = db.connect()
-    try:
+    with db.connect() as con:
         out = db.left_join_preserving_order(con, out, names, on=["rbd", "program_code"])
-    finally:
-        con.close()
     out[PROGRAM_DISPLAY_NAME] = out[PROGRAM_DISPLAY_NAME].fillna(UNKNOWN_PROGRAM_NAME)
     out[SCHOOL_NAME] = out[SCHOOL_NAME].fillna("")
     out[SCHOOL_COMMUNE] = out[SCHOOL_COMMUNE].fillna("")
@@ -781,62 +766,62 @@ def validate_cumulative_share_columns(
     if not available_tiers:
         return []
 
-    con = db.connect()
-    con.register("_share_src", calib)
+    with db.connect() as con:
+        db.register_df(con, "_share_src", calib)
 
-    aggregates: list[str] = []
-    for tier in available_tiers:
-        share = _numeric_cast_expr(f"priority_share_{tier}_2024")
-        before = _numeric_cast_expr(f"cum_share_before_{tier}_2024")
-        through = _numeric_cast_expr(f"cum_share_through_{tier}_2024")
-        valid = f"({share} IS NOT NULL AND {before} IS NOT NULL AND {through} IS NOT NULL)"
-        out_of_range = (
-            f"({share} < {-tolerance} OR {share} > {1 + tolerance} "
-            f"OR {before} < {-tolerance} OR {before} > {1 + tolerance} "
-            f"OR {through} < {-tolerance} OR {through} > {1 + tolerance})"
-        )
-        diff = f"ABS(({before} + {share}) - {through})"
-        aggregates += [
-            f'COUNT(*) FILTER (WHERE {share} IS NULL OR {before} IS NULL OR {through} IS NULL) AS "{tier}__missing"',
-            f'COUNT(*) FILTER (WHERE {valid} AND {out_of_range}) AS "{tier}__out_of_range"',
-            f'COUNT(*) FILTER (WHERE {valid} AND {diff} > {tolerance}) AS "{tier}__inconsistent"',
-            f'MAX({diff}) FILTER (WHERE {valid} AND {diff} > {tolerance}) AS "{tier}__inconsistent_max_diff"',
+        aggregates: list[str] = []
+        for tier in available_tiers:
+            share = _numeric_cast_expr(f"priority_share_{tier}_2024")
+            before = _numeric_cast_expr(f"cum_share_before_{tier}_2024")
+            through = _numeric_cast_expr(f"cum_share_through_{tier}_2024")
+            valid = f"({share} IS NOT NULL AND {before} IS NOT NULL AND {through} IS NOT NULL)"
+            out_of_range = (
+                f"({share} < {-tolerance} OR {share} > {1 + tolerance} "
+                f"OR {before} < {-tolerance} OR {before} > {1 + tolerance} "
+                f"OR {through} < {-tolerance} OR {through} > {1 + tolerance})"
+            )
+            diff = f"ABS(({before} + {share}) - {through})"
+            aggregates += [
+                f'COUNT(*) FILTER (WHERE {share} IS NULL OR {before} IS NULL OR {through} IS NULL) AS "{tier}__missing"',
+                f'COUNT(*) FILTER (WHERE {valid} AND {out_of_range}) AS "{tier}__out_of_range"',
+                f'COUNT(*) FILTER (WHERE {valid} AND {diff} > {tolerance}) AS "{tier}__inconsistent"',
+                f'MAX({diff}) FILTER (WHERE {valid} AND {diff} > {tolerance}) AS "{tier}__inconsistent_max_diff"',
+            ]
+
+        first_tier = available_tiers[0] if available_tiers[0] == TIERS[0] else None
+        if first_tier:
+            first_before = _numeric_cast_expr(f"cum_share_before_{first_tier}_2024")
+            aggregates.append(
+                f'COUNT(*) FILTER (WHERE {first_before} IS NOT NULL AND ABS({first_before}) > {tolerance}) '
+                f'AS "start__invalid"'
+            )
+
+        adjacency_pairs = [
+            (previous_tier, current_tier)
+            for previous_tier, current_tier in zip(TIERS, TIERS[1:])
+            if previous_tier in available_tiers and current_tier in available_tiers
         ]
+        for previous_tier, current_tier in adjacency_pairs:
+            previous_through = _numeric_cast_expr(f"cum_share_through_{previous_tier}_2024")
+            current_before = _numeric_cast_expr(f"cum_share_before_{current_tier}_2024")
+            both_valid = f"({previous_through} IS NOT NULL AND {current_before} IS NOT NULL)"
+            gap = f"ABS({previous_through} - {current_before})"
+            key = f"{previous_tier}__{current_tier}"
+            aggregates += [
+                f'COUNT(*) FILTER (WHERE {both_valid} AND {gap} > {tolerance}) AS "{key}__discontinuous"',
+                f'MAX({gap}) FILTER (WHERE {both_valid} AND {gap} > {tolerance}) AS "{key}__discontinuous_max_gap"',
+            ]
 
-    first_tier = available_tiers[0] if available_tiers[0] == TIERS[0] else None
-    if first_tier:
-        first_before = _numeric_cast_expr(f"cum_share_before_{first_tier}_2024")
-        aggregates.append(
-            f'COUNT(*) FILTER (WHERE {first_before} IS NOT NULL AND ABS({first_before}) > {tolerance}) '
-            f'AS "start__invalid"'
-        )
+        last_tier = available_tiers[-1] if available_tiers[-1] == TIERS[-1] else None
+        if last_tier:
+            final_through = _numeric_cast_expr(f"cum_share_through_{last_tier}_2024")
+            aggregates.append(
+                f'COUNT(*) FILTER (WHERE {final_through} IS NOT NULL AND ABS({final_through} - 1.0) > {tolerance}) '
+                f'AS "end__invalid"'
+            )
 
-    adjacency_pairs = [
-        (previous_tier, current_tier)
-        for previous_tier, current_tier in zip(TIERS, TIERS[1:])
-        if previous_tier in available_tiers and current_tier in available_tiers
-    ]
-    for previous_tier, current_tier in adjacency_pairs:
-        previous_through = _numeric_cast_expr(f"cum_share_through_{previous_tier}_2024")
-        current_before = _numeric_cast_expr(f"cum_share_before_{current_tier}_2024")
-        both_valid = f"({previous_through} IS NOT NULL AND {current_before} IS NOT NULL)"
-        gap = f"ABS({previous_through} - {current_before})"
-        key = f"{previous_tier}__{current_tier}"
-        aggregates += [
-            f'COUNT(*) FILTER (WHERE {both_valid} AND {gap} > {tolerance}) AS "{key}__discontinuous"',
-            f'MAX({gap}) FILTER (WHERE {both_valid} AND {gap} > {tolerance}) AS "{key}__discontinuous_max_gap"',
-        ]
-
-    last_tier = available_tiers[-1] if available_tiers[-1] == TIERS[-1] else None
-    if last_tier:
-        final_through = _numeric_cast_expr(f"cum_share_through_{last_tier}_2024")
-        aggregates.append(
-            f'COUNT(*) FILTER (WHERE {final_through} IS NOT NULL AND ABS({final_through} - 1.0) > {tolerance}) '
-            f'AS "end__invalid"'
-        )
-
-    row = con.sql(f"SELECT {', '.join(aggregates)} FROM _share_src").df().iloc[0]
-    con.unregister("_share_src")
+        row = con.sql(f"SELECT {', '.join(aggregates)} FROM _share_src").df().iloc[0]
+        con.unregister("_share_src")
 
     errors: list[str] = []
     for tier in available_tiers:
@@ -921,65 +906,65 @@ def validate_core_numeric_columns(
     if not integer_columns:
         return []
 
-    con = db.connect()
-    con.register("_numeric_src", calib)
+    with db.connect() as con:
+        db.register_df(con, "_numeric_src", calib)
 
-    exprs = {col: _numeric_cast_expr(col) for col in integer_columns}
-    aggregates: list[str] = []
-    for col in integer_columns:
-        v = exprs[col]
-        minimum = "0" if col == POP else "-1e18"
-        # POP must be strictly positive (<=0 invalid); every other column is
-        # non-negative (<0 invalid). Using a very low bound plus `< 0` filter
-        # keeps a single template while preserving each column's own rule.
-        minimum_invalid = f"{v} <= 0" if col == POP else f"{v} < 0"
-        aggregates += [
-            f'COUNT(*) FILTER (WHERE {v} IS NULL) AS "{col}__invalid_number"',
-            f'COUNT(*) FILTER (WHERE {v} IS NOT NULL AND ({minimum_invalid})) AS "{col}__minimum_invalid"',
-            f'COUNT(*) FILTER (WHERE {v} IS NOT NULL AND ABS({v} - ROUND({v})) > {tolerance}) '
-            f'AS "{col}__non_integer"',
-        ]
+        exprs = {col: _numeric_cast_expr(col) for col in integer_columns}
+        aggregates: list[str] = []
+        for col in integer_columns:
+            v = exprs[col]
+            minimum = "0" if col == POP else "-1e18"
+            # POP must be strictly positive (<=0 invalid); every other column is
+            # non-negative (<0 invalid). Using a very low bound plus `< 0` filter
+            # keeps a single template while preserving each column's own rule.
+            minimum_invalid = f"{v} <= 0" if col == POP else f"{v} < 0"
+            aggregates += [
+                f'COUNT(*) FILTER (WHERE {v} IS NULL) AS "{col}__invalid_number"',
+                f'COUNT(*) FILTER (WHERE {v} IS NOT NULL AND ({minimum_invalid})) AS "{col}__minimum_invalid"',
+                f'COUNT(*) FILTER (WHERE {v} IS NOT NULL AND ABS({v} - ROUND({v})) > {tolerance}) '
+                f'AS "{col}__non_integer"',
+            ]
 
-    def _pair_valid(col_a: str, col_b: str) -> str:
-        return f"({exprs[col_a]} IS NOT NULL AND {exprs[col_b]} IS NOT NULL)"
+        def _pair_valid(col_a: str, col_b: str) -> str:
+            return f"({exprs[col_a]} IS NOT NULL AND {exprs[col_b]} IS NOT NULL)"
 
-    has_true_app_pop = TRUE_APP in integer_columns and POP in integer_columns
-    if has_true_app_pop:
-        aggregates.append(
-            f'COUNT(*) FILTER (WHERE {_pair_valid(TRUE_APP, POP)} '
-            f'AND {exprs[TRUE_APP]} > {exprs[POP]} + {tolerance}) AS "true_app_exceeds_pop"'
-        )
+        has_true_app_pop = TRUE_APP in integer_columns and POP in integer_columns
+        if has_true_app_pop:
+            aggregates.append(
+                f'COUNT(*) FILTER (WHERE {_pair_valid(TRUE_APP, POP)} '
+                f'AND {exprs[TRUE_APP]} > {exprs[POP]} + {tolerance}) AS "true_app_exceeds_pop"'
+            )
 
-    has_priority_seats = CAPACITY in integer_columns and PRIORITY_STUDENT_SEATS in integer_columns
-    if has_priority_seats:
-        aggregates.append(
-            f'COUNT(*) FILTER (WHERE {_pair_valid(CAPACITY, PRIORITY_STUDENT_SEATS)} '
-            f'AND {exprs[PRIORITY_STUDENT_SEATS]} > {exprs[CAPACITY]} + {tolerance}) '
-            f'AS "priority_seats_exceed_capacity"'
-        )
+        has_priority_seats = CAPACITY in integer_columns and PRIORITY_STUDENT_SEATS in integer_columns
+        if has_priority_seats:
+            aggregates.append(
+                f'COUNT(*) FILTER (WHERE {_pair_valid(CAPACITY, PRIORITY_STUDENT_SEATS)} '
+                f'AND {exprs[PRIORITY_STUDENT_SEATS]} > {exprs[CAPACITY]} + {tolerance}) '
+                f'AS "priority_seats_exceed_capacity"'
+            )
 
-    has_total_capacity = CAPACITY in integer_columns and TOTAL_CAPACITY_COLUMN in integer_columns
-    if has_total_capacity:
-        aggregates.append(
-            f'COUNT(*) FILTER (WHERE {_pair_valid(CAPACITY, TOTAL_CAPACITY_COLUMN)} '
-            f'AND {exprs[CAPACITY]} > {exprs[TOTAL_CAPACITY_COLUMN]} + {tolerance}) '
-            f'AS "capacity_exceeds_total_capacity"'
-        )
+        has_total_capacity = CAPACITY in integer_columns and TOTAL_CAPACITY_COLUMN in integer_columns
+        if has_total_capacity:
+            aggregates.append(
+                f'COUNT(*) FILTER (WHERE {_pair_valid(CAPACITY, TOTAL_CAPACITY_COLUMN)} '
+                f'AND {exprs[CAPACITY]} > {exprs[TOTAL_CAPACITY_COLUMN]} + {tolerance}) '
+                f'AS "capacity_exceeds_total_capacity"'
+            )
 
-    has_seat_components = CAPACITY in integer_columns and all(col in integer_columns for col in SEAT_COMPONENT_COLUMNS)
-    if has_seat_components:
-        components_sum = " + ".join(exprs[col] for col in SEAT_COMPONENT_COLUMNS)
-        components_valid = " AND ".join(f"{exprs[col]} IS NOT NULL" for col in SEAT_COMPONENT_COLUMNS)
-        seat_diff = f"ABS(({components_sum}) - {exprs[CAPACITY]})"
-        aggregates += [
-            f'COUNT(*) FILTER (WHERE {exprs[CAPACITY]} IS NOT NULL AND {components_valid} '
-            f'AND {seat_diff} > {tolerance}) AS "seat_components_mismatch"',
-            f'MAX({seat_diff}) FILTER (WHERE {exprs[CAPACITY]} IS NOT NULL AND {components_valid} '
-            f'AND {seat_diff} > {tolerance}) AS "seat_components_mismatch_max_diff"',
-        ]
+        has_seat_components = CAPACITY in integer_columns and all(col in integer_columns for col in SEAT_COMPONENT_COLUMNS)
+        if has_seat_components:
+            components_sum = " + ".join(exprs[col] for col in SEAT_COMPONENT_COLUMNS)
+            components_valid = " AND ".join(f"{exprs[col]} IS NOT NULL" for col in SEAT_COMPONENT_COLUMNS)
+            seat_diff = f"ABS(({components_sum}) - {exprs[CAPACITY]})"
+            aggregates += [
+                f'COUNT(*) FILTER (WHERE {exprs[CAPACITY]} IS NOT NULL AND {components_valid} '
+                f'AND {seat_diff} > {tolerance}) AS "seat_components_mismatch"',
+                f'MAX({seat_diff}) FILTER (WHERE {exprs[CAPACITY]} IS NOT NULL AND {components_valid} '
+                f'AND {seat_diff} > {tolerance}) AS "seat_components_mismatch_max_diff"',
+            ]
 
-    row = con.sql(f"SELECT {', '.join(aggregates)} FROM _numeric_src").df().iloc[0]
-    con.unregister("_numeric_src")
+        row = con.sql(f"SELECT {', '.join(aggregates)} FROM _numeric_src").df().iloc[0]
+        con.unregister("_numeric_src")
 
     errors: list[str] = []
     for col in integer_columns:
